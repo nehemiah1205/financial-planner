@@ -211,9 +211,9 @@ def step1_basic_info():
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 朱耀通訊處"), key="firm")
+        st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 竹耀通訊處"), key="firm")
     with c2:
-        st.text_input("職稱", value=st.session_state.get("title", "業務經理"), key="title")
+        st.text_input("職稱", value=st.session_state.get("title", "處經理"), key="title")
 
     st.success("✅ 所有輸入即時自動儲存，可直接切換至左側其他頁面。")
 
