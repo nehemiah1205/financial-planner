@@ -211,9 +211,9 @@ def step1_basic_info():
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 竹耀通訊處"), key="firm")
+        st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 朱耀通訊處"), key="firm")
     with c2:
-        st.text_input("職稱", value=st.session_state.get("title", "處經理"), key="title")
+        st.text_input("職稱", value=st.session_state.get("title", "業務經理"), key="title")
 
     st.success("✅ 所有輸入即時自動儲存，可直接切換至左側其他頁面。")
 
@@ -780,7 +780,8 @@ def module_data_management():
 # ==========================================================
 # 客戶總覽報告（重點彙整，適合列印/分享）
 # ==========================================================
-def _health_metric_rows(sf):
+def _health_metric_configs(sf):
+    """計算四大健康指標，並附上繪製「指標尺」所需的座標與狀態。"""
     annual_income = sf["total_income"]
     annual_expense = sf["total_expense"]
     total_assets = sf["total_assets"]
@@ -794,13 +795,24 @@ def _health_metric_rows(sf):
     emergency_months = liquid / monthly_expense
     financial_freedom = (investable * 0.04) / annual_expense if annual_expense > 0 else 0
 
-    return [
-        ("儲蓄率", f"{savings_rate:.1f}%", ">25%", "✅ 良好" if savings_rate > 25 else "⚠️ 需注意"),
-        ("負債比", f"{debt_ratio:.1f}%", "≤30%", "✅ 良好" if debt_ratio <= 30 else "⚠️ 偏高"),
-        ("生活週轉金", f"{emergency_months:.1f} 個月", "3~6個月",
-         "✅ 良好" if 3 <= emergency_months <= 6 else "⚠️ 需注意"),
-        ("財務自由度", f"{financial_freedom:.2f}", ">1.0", "✅ 良好" if financial_freedom > 1 else "⚠️ 需注意"),
+    def pct_of(v, lo, hi):
+        return max(0.0, min(100.0, (v - lo) / (hi - lo) * 100))
+
+    configs = [
+        {"label": "儲蓄率", "value_str": f"{savings_rate:.1f}%", "ideal_text": "＞25%",
+         "pct": pct_of(savings_rate, 0, 50), "ideal_lo": pct_of(25, 0, 50), "ideal_hi": 100,
+         "status": "good" if savings_rate > 25 else "warn"},
+        {"label": "負債比", "value_str": f"{debt_ratio:.1f}%", "ideal_text": "≤30%",
+         "pct": pct_of(debt_ratio, 0, 100), "ideal_lo": 0, "ideal_hi": pct_of(30, 0, 100),
+         "status": "good" if debt_ratio <= 30 else "warn"},
+        {"label": "生活週轉金", "value_str": f"{emergency_months:.1f} 個月", "ideal_text": "3~6個月",
+         "pct": pct_of(emergency_months, 0, 12), "ideal_lo": pct_of(3, 0, 12), "ideal_hi": pct_of(6, 0, 12),
+         "status": "good" if 3 <= emergency_months <= 6 else "warn"},
+        {"label": "財務自由度", "value_str": f"{financial_freedom:.2f}", "ideal_text": "＞1.0",
+         "pct": pct_of(financial_freedom, 0, 2), "ideal_lo": pct_of(1, 0, 2), "ideal_hi": 100,
+         "status": "good" if financial_freedom > 1 else "warn"},
     ]
+    return configs
 
 
 def _pick_plan_result(label, keys):
@@ -811,7 +823,7 @@ def _pick_plan_result(label, keys):
     return options[pick]
 
 
-def build_summary_text(fam_display, sf, health_rows, goal_rows, advisor_note):
+def build_summary_text(fam_display, sf, health_configs, goal_rows, advisor_note):
     lines = ["家庭財務健康摘要報告", f"報告日期：{st.session_state.get('ref_date', datetime.date.today())}", ""]
     lines.append("【家庭成員】")
     for _, r in fam_display.iterrows():
@@ -825,8 +837,9 @@ def build_summary_text(fam_display, sf, health_rows, goal_rows, advisor_note):
         lines.append(f"家庭淨資產：{money(sf['total_assets'] - sf['total_liab'])}")
         lines.append("")
         lines.append("【財務健康指標】")
-        for name, val, ideal, status in health_rows:
-            lines.append(f"- {name}：{val}（理想值 {ideal}）{status}")
+        for c in health_configs:
+            status_txt = "良好" if c["status"] == "good" else "需注意"
+            lines.append(f"- {c['label']}：{c['value_str']}（理想值 {c['ideal_text']}）{status_txt}")
         lines.append("")
     if goal_rows:
         lines.append("【財務目標缺口】")
@@ -839,45 +852,136 @@ def build_summary_text(fam_display, sf, health_rows, goal_rows, advisor_note):
     return "\n".join(lines)
 
 
-def summary_report_page():
-    st.markdown("""<style>
-    @media print { section[data-testid="stSidebar"], .stSidebar { display:none !important; } }
-    </style>""", unsafe_allow_html=True)
+_REPORT_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;700&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+@media print { section[data-testid="stSidebar"], .stSidebar { display:none !important; } }
 
-    st.title("📋 財務健康摘要報告")
-    st.caption("彙整所有試算結果的重點摘要，適合列印或分享給客戶。可用瀏覽器「列印→另存為PDF」輸出。")
+.fp-wrap { font-family:'Noto Sans TC', sans-serif; color:#1A2233; }
+.fp-banner{
+  background:linear-gradient(135deg,#14213D 0%,#1F3560 100%);
+  border-bottom:3px solid #A9832B; border-radius:10px;
+  padding:28px 32px; margin-bottom:28px;
+}
+.fp-eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.18em;
+  color:#C9A85C; text-transform:uppercase; margin-bottom:8px; }
+.fp-banner-title{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:26px; color:#FFFFFF; margin-bottom:8px; }
+.fp-banner-meta{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:#B7C2D6; }
+
+.fp-section-eyebrow{ display:flex; align-items:center; gap:10px; margin:8px 0 14px 0; }
+.fp-section-eyebrow .line{ flex:0 0 3px; align-self:stretch; background:#A9832B; border-radius:2px; }
+.fp-section-eyebrow .txt{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:18px; color:#14213D; }
+
+.fp-chiprow{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:6px; }
+.fp-chip{ display:flex; align-items:center; gap:10px; background:#FFFFFF; border:1px solid #E4E7EC;
+  border-radius:10px; padding:10px 14px; min-width:150px; }
+.fp-chip-icon{ font-size:20px; }
+.fp-chip-name{ font-weight:700; font-size:14px; }
+.fp-chip-meta{ font-size:12px; color:#5B6472; font-family:'IBM Plex Mono',monospace; }
+
+.fp-statrow{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:8px; }
+.fp-stat{ background:#FFFFFF; border:1px solid #E4E7EC; border-left:4px solid #A9832B;
+  border-radius:8px; padding:16px 18px; }
+.fp-stat-label{ font-size:12.5px; color:#5B6472; margin-bottom:6px; }
+.fp-stat-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:22px; color:#14213D; }
+
+.fp-gaugerow{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:8px; }
+.fp-gauge-card{ background:#FFFFFF; border:1px solid #E4E7EC; border-radius:8px; padding:16px 18px; }
+.fp-gauge-top{ display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+.fp-gauge-label{ font-size:13px; font-weight:700; color:#14213D; }
+.fp-gauge-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:20px; margin-bottom:10px; }
+.fp-gauge-track{ position:relative; height:8px; background:#EDEFF2; border-radius:4px; margin-bottom:6px; }
+.fp-gauge-ideal{ position:absolute; top:0; bottom:0; background:rgba(169,131,43,.28); border-radius:4px; }
+.fp-gauge-marker{ position:absolute; top:-4px; width:16px; height:16px; border-radius:50%;
+  transform:translateX(-50%); border:2px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,.12); }
+.fp-marker-good{ background:#2F7A4C; }
+.fp-marker-warn{ background:#B5790A; }
+.fp-gauge-scale{ font-size:11px; color:#5B6472; font-family:'IBM Plex Mono',monospace; }
+
+.fp-badge{ display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:99px; }
+.fp-badge-good{ background:#E6F2EA; color:#2F7A4C; }
+.fp-badge-warn{ background:#FBEEDD; color:#B5790A; }
+
+.fp-ledger{ background:#FFFFFF; border:1px solid #E4E7EC; border-radius:8px; overflow:hidden; margin-bottom:8px; }
+.fp-ledger-head, .fp-ledger-row{ display:grid; grid-template-columns:2fr 1.1fr 1.3fr; gap:10px; padding:11px 16px; align-items:center; }
+.fp-ledger-head{ background:#F7F7F5; font-size:12px; color:#5B6472; font-weight:700; }
+.fp-ledger-row{ border-top:1px solid #F0F1F3; border-left:4px solid transparent; font-size:13.5px; }
+.fp-ledger-row.warn{ border-left-color:#B5790A; }
+.fp-ledger-row.good{ border-left-color:#2F7A4C; }
+.fp-ledger-name{ font-weight:700; color:#14213D; }
+.fp-ledger-gap{ font-family:'IBM Plex Mono',monospace; }
+.fp-ledger-monthly{ font-family:'IBM Plex Mono',monospace; color:#5B6472; }
+
+.fp-note-card{ background:#FFFDF7; border:1px solid #EFE3C6; border-left:4px solid #A9832B;
+  border-radius:8px; padding:4px 6px 2px 6px; margin-bottom:10px; }
+
+.fp-footer{ font-size:11.5px; color:#98A2B3; text-align:center; margin-top:18px; padding-top:12px; border-top:1px solid #E4E7EC; }
+</style>
+"""
+
+
+def _badge(status):
+    return f'<span class="fp-badge fp-badge-{status}">{"良好" if status == "good" else "需注意"}</span>'
+
+
+def summary_report_page():
+    st.markdown(_REPORT_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="fp-wrap">', unsafe_allow_html=True)
 
     ref_date = st.session_state.get("ref_date", datetime.date.today())
     firm = st.session_state.get("firm", "")
     title = st.session_state.get("title", "")
-    st.markdown(f"**報告日期：** {ref_date.strftime('%Y-%m-%d')}" + (f"　|　{firm} {title}" if firm or title else ""))
-
-    st.divider()
-    st.subheader("👥 家庭成員")
     df = get_family_df()
     fam_display = df.copy()
     fam_display["年齡"] = fam_display["生日"].apply(lambda d: age_from_dob(d, ref_date))
-    st.dataframe(fam_display[["關係", "姓名", "性別", "年齡"]], hide_index=True, use_container_width=True)
+    self_row = fam_display[fam_display["關係"] == "本人"]
+    client_name = self_row.iloc[0]["姓名"] if len(self_row) else "客戶"
 
-    st.divider()
-    st.subheader("💰 財務現況總覽")
+    st.markdown(f"""
+    <div class="fp-banner">
+      <div class="fp-eyebrow">FINANCIAL HEALTH REPORT</div>
+      <div class="fp-banner-title">{client_name} 家庭・財務健康摘要報告</div>
+      <div class="fp-banner-meta">報告日期　{ref_date.strftime('%Y-%m-%d')}　　{(firm + ' ' + title) if (firm or title) else ''}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="fp-section-eyebrow"><div class="line"></div><div class="txt">👥 家庭成員</div></div>', unsafe_allow_html=True)
+    icon_map = {"男": "👨", "女": "👩"}
+    chips = "".join(
+        f'<div class="fp-chip"><div class="fp-chip-icon">{icon_map.get(r["性別"], "🧑")}</div>'
+        f'<div><div class="fp-chip-name">{r["姓名"]}</div><div class="fp-chip-meta">{r["關係"]}・{r["年齡"]}歲</div></div></div>'
+        for _, r in fam_display.iterrows()
+    )
+    st.markdown(f'<div class="fp-chiprow">{chips}</div>', unsafe_allow_html=True)
+
     sf = st.session_state.get("sf")
-    health_rows = []
+    health_configs = []
     if sf:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("年度總收入", money(sf["total_income"]))
-        c2.metric("年度總支出", money(sf["total_expense"]))
-        c3.metric("年度淨結餘", money(sf["net"]))
-        c4.metric("家庭淨資產", money(sf["total_assets"] - sf["total_liab"]))
+        st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">💰 財務現況總覽</div></div>', unsafe_allow_html=True)
+        stats = [
+            ("年度總收入", money(sf["total_income"])), ("年度總支出", money(sf["total_expense"])),
+            ("年度淨結餘", money(sf["net"])), ("家庭淨資產", money(sf["total_assets"] - sf["total_liab"])),
+        ]
+        stat_html = "".join(f'<div class="fp-stat"><div class="fp-stat-label">{lbl}</div><div class="fp-stat-value">{val}</div></div>' for lbl, val in stats)
+        st.markdown(f'<div class="fp-statrow">{stat_html}</div>', unsafe_allow_html=True)
 
-        st.markdown("**財務健康四大指標**")
-        health_rows = _health_metric_rows(sf)
-        st.table(pd.DataFrame(health_rows, columns=["指標", "現況", "理想值", "狀態"]))
+        st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">📐 財務健康指標尺</div></div>', unsafe_allow_html=True)
+        health_configs = _health_metric_configs(sf)
+        gauge_html = "".join(f"""
+        <div class="fp-gauge-card">
+          <div class="fp-gauge-top"><span class="fp-gauge-label">{c['label']}</span>{_badge(c['status'])}</div>
+          <div class="fp-gauge-value">{c['value_str']}</div>
+          <div class="fp-gauge-track">
+            <div class="fp-gauge-ideal" style="left:{c['ideal_lo']}%;width:{max(0, c['ideal_hi'] - c['ideal_lo'])}%;"></div>
+            <div class="fp-gauge-marker fp-marker-{c['status']}" style="left:{c['pct']}%;"></div>
+          </div>
+          <div class="fp-gauge-scale">理想區間　{c['ideal_text']}</div>
+        </div>""" for c in health_configs)
+        st.markdown(f'<div class="fp-gaugerow">{gauge_html}</div>', unsafe_allow_html=True)
     else:
         st.info("尚未輸入 Step 3 收支與資產負債資料。")
 
-    st.divider()
-    st.subheader("🎯 各項財務目標缺口彙總")
+    st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">🎯 各項財務目標缺口彙總</div></div>', unsafe_allow_html=True)
     goal_rows = []
     ret_gap, ret_monthly = st.session_state.get("ret_total_gap"), st.session_state.get("ret_total_monthly")
     if ret_gap is not None:
@@ -887,7 +991,7 @@ def summary_report_page():
         goal_rows.append(["子女教育金", money(edu_gap), f"{money(edu_monthly)}/月" if edu_monthly else "-"])
     ins_gap = st.session_state.get("ins_total_gap")
     if ins_gap is not None:
-        goal_rows.append(["保障缺口（壽險＋意外險）", money(ins_gap), "-（建議依缺口規劃保費）"])
+        goal_rows.append(["保障缺口（壽險＋意外險）", money(ins_gap), "依缺口規劃保費" if ins_gap > 0 else "-"])
 
     house_r = _pick_plan_result("選擇要顯示的購屋計畫", ["hA", "hB", "hC"])
     if house_r:
@@ -899,23 +1003,36 @@ def summary_report_page():
                            f"{money(car_r['monthly'])}/月" if car_r["gap"] > 0 else "資金充足"])
 
     if goal_rows:
-        st.table(pd.DataFrame(goal_rows, columns=["財務目標", "資金缺口", "每月建議投入"]))
+        rows_html = "".join(
+            f'<div class="fp-ledger-row {"good" if ("充足" in str(row[2]) or row[1] in ("$0","-")) else "warn"}">'
+            f'<div class="fp-ledger-name">{row[0]}</div><div class="fp-ledger-gap">{row[1]}</div>'
+            f'<div class="fp-ledger-monthly">{row[2]}</div></div>' for row in goal_rows
+        )
+        st.markdown(f"""
+        <div class="fp-ledger">
+          <div class="fp-ledger-head"><div>財務目標</div><div>資金缺口</div><div>每月建議投入</div></div>
+          {rows_html}
+        </div>""", unsafe_allow_html=True)
     else:
         st.info("尚未計算任何專題試算，請先至左側「專題 A~D」完成試算後再回到本頁。")
 
-    st.divider()
-    st.subheader("📝 顧問建議")
+    st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">📝 顧問建議</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="fp-note-card">', unsafe_allow_html=True)
     advisor_note = st.text_area("給客戶的建議摘要（可自行編輯，會保留在本次工作階段）",
-                                 value=st.session_state.get("advisor_note", ""), height=140, key="advisor_note")
+                                 value=st.session_state.get("advisor_note", ""), height=140,
+                                 key="advisor_note", label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        st.info("💡 輸出 PDF：使用瀏覽器「列印」（Ctrl/Cmd+P）→「另存為PDF」，本頁已針對列印優化，會自動隱藏側邊選單。")
+        st.caption("💡 輸出 PDF：使用瀏覽器「列印」（Ctrl/Cmd+P）→「另存為PDF」，本頁已針對列印優化，會自動隱藏側邊選單。")
     with c2:
-        summary_text = build_summary_text(fam_display, sf, health_rows, goal_rows, advisor_note)
+        summary_text = build_summary_text(fam_display, sf, health_configs, goal_rows, advisor_note)
         st.download_button("⬇️ 下載文字摘要 (.txt)", data=summary_text.encode("utf-8"),
                             file_name=f"財務健康摘要_{ref_date}.txt", mime="text/plain")
+
+    st.markdown(f'<div class="fp-footer">本報告由系統自動彙整試算結果，僅供財務規劃參考，實際保單/貸款/投資條件請以正式文件為準。{(firm) if firm else ""}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ==========================================================
