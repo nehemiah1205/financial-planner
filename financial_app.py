@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy_financial as npf
 import datetime
+import json
 
 st.set_page_config(page_title="家庭財務健康體檢與目標模擬系統", page_icon="💰",
                     layout="wide", initial_sidebar_state="expanded")
@@ -81,18 +82,21 @@ def age_from_dob(dob, ref_date=None):
 
 
 def item_table(key, items, per_row_label="金額(年)", step=1000):
-    """建立一個可編輯的『項目-金額』表，回傳 {項目: 金額} 與加總。"""
-    if key not in st.session_state:
-        st.session_state[key] = {it: 0 for it in items}
-    stored = st.session_state[key]
-    df = pd.DataFrame({"項目": items, per_row_label: [int(stored.get(it, 0)) for it in items]})
+    """建立一個可編輯的『項目-金額』表，回傳 {項目: 金額} 與加總。
+    以同一份 DataFrame 作為 session_state 中的唯一資料來源，每次重新整理都直接沿用
+    data_editor 上次回傳的結果，而不是從別處重建一份新的 DataFrame 餵給它，
+    避免使用者剛輸入的數字被重置成 0（Streamlit data_editor 若每次收到「不同」的
+    來源資料，會誤判成資料異動並重置編輯狀態）。"""
+    df_key = key + "_df"
+    if df_key not in st.session_state:
+        st.session_state[df_key] = pd.DataFrame({"項目": items, per_row_label: [0] * len(items)})
     edited = st.data_editor(
-        df, key=key + "_editor", hide_index=True, use_container_width=True,
-        column_config={per_row_label: st.column_config.NumberColumn(per_row_label, step=step, format="%d")},
+        st.session_state[df_key], key=key + "_editor", hide_index=True, use_container_width=True,
+        column_config={per_row_label: st.column_config.NumberColumn(per_row_label, step=step, format="%d", min_value=0)},
         disabled=["項目"],
     )
-    result = dict(zip(edited["項目"], edited[per_row_label].fillna(0)))
-    st.session_state[key] = result
+    st.session_state[df_key] = edited
+    result = {row["項目"]: int(row[per_row_label] or 0) for _, row in edited.iterrows()}
     return result, sum(result.values())
 
 
@@ -123,21 +127,22 @@ def get_default_retire_params():
 
 
 def get_retire_params_df():
-    """依家庭成員(本人/配偶)動態維護退休參數表。"""
+    """依家庭成員(本人/配偶)動態維護退休參數表。
+    只有在『人員名單有變動』(新增/刪除家庭成員) 時才重建 DataFrame；
+    平常編輯數字時直接沿用 session_state 裡同一份 DataFrame，
+    避免每次重新整理都建立新物件餵給 data_editor 導致剛輸入的數字被重置。"""
     df = get_family_df()
     people = df[df["關係"].isin(["本人", "配偶"])]["姓名"].dropna().tolist()
     if not people:
         people = ["本人"]
-    store = st.session_state.setdefault("retire_params", {})
-    for p in people:
-        store.setdefault(p, get_default_retire_params())
-    store = {k: v for k, v in store.items() if k in people}
-    st.session_state.retire_params = store
-    rows = []
-    for p in people:
-        row = {"姓名": p, **store[p]}
-        rows.append(row)
-    return pd.DataFrame(rows)
+
+    stored_df = st.session_state.get("retire_params_df")
+    if stored_df is None or set(stored_df["姓名"].tolist()) != set(people):
+        existing = stored_df.set_index("姓名").to_dict("index") if stored_df is not None else {}
+        rows = [{"姓名": p, **existing.get(p, get_default_retire_params())} for p in people]
+        stored_df = pd.DataFrame(rows)
+        st.session_state.retire_params_df = stored_df
+    return stored_df
 
 
 # ==========================================================
@@ -154,21 +159,22 @@ def step1_basic_info():
     st.subheader("👥 家庭成員基本資料")
     st.info("💡 **表格操作**：雙擊儲存格可直接編輯；點表格最下方「+」新增一列；勾選最左側方塊後按 `Delete` 可刪除該列。")
 
-    display_df = get_family_df().copy()
-    display_df["年齡"] = display_df["生日"].apply(lambda d: age_from_dob(d, ref_date))
-
     edited_df = st.data_editor(
-        display_df,
+        get_family_df(),
         column_config={
             "性別": st.column_config.SelectboxColumn("性別", options=["男", "女", "其他"], required=True),
             "生日": st.column_config.DateColumn("生日", format="YYYY-MM-DD", required=True),
-            "年齡": st.column_config.NumberColumn("年齡 (自動計算)", disabled=True),
             "關係": st.column_config.SelectboxColumn(
                 "關係", options=["本人", "配偶", "父親", "母親"] + CHILD_RELATIONS),
         },
         num_rows="dynamic", use_container_width=True, hide_index=True, key="family_editor",
     )
-    st.session_state.family_df = edited_df.drop(columns=["年齡"], errors="ignore")
+    st.session_state.family_df = edited_df
+
+    age_display = edited_df.copy()
+    age_display["年齡"] = age_display["生日"].apply(lambda d: age_from_dob(d, ref_date))
+    st.caption("目前年齡（依上方生日與資料輸入日期自動計算）")
+    st.dataframe(age_display[["姓名", "年齡"]].set_index("姓名").T, use_container_width=True)
 
     st.divider()
     st.subheader("⚙️ 退休與經濟假設參數（依「本人 / 配偶」自動列出）")
@@ -183,10 +189,7 @@ def step1_basic_info():
             "退休後投報率(%)": st.column_config.NumberColumn(format="%.1f"),
         },
     )
-    new_store = {}
-    for _, row in edited_params.iterrows():
-        new_store[row["姓名"]] = {c: row[c] for c in edited_params.columns if c != "姓名"}
-    st.session_state.retire_params = new_store
+    st.session_state.retire_params_df = edited_params
 
     st.divider()
     st.subheader("📝 客戶現況說明")
@@ -682,6 +685,99 @@ def module_insurance():
 
 
 # ==========================================================
+# 資料存檔與讀取（下載/上傳備份，解決關閉分頁資料消失的問題）
+# ==========================================================
+# 記錄哪些 DataFrame 欄位是日期型別，匯出/匯入時需要特別轉換
+DATE_COLUMNS_BY_DF = {"family_df": ["生日"]}
+
+
+def _export_all_data():
+    """掃描目前 session_state，自動打包所有『使用者資料』(不含 Streamlit 內部元件狀態)。
+    採用自動掃描而非手動列出每個欄位，這樣以後新增頁面/欄位也不用再回來維護這個函式。"""
+    dataframes, values = {}, {}
+    for k, v in list(st.session_state.items()):
+        if k.endswith("_editor") or k == "backup_uploader":
+            continue  # Streamlit 元件自身的內部狀態，不屬於使用者資料，跳過
+        if isinstance(v, pd.DataFrame):
+            df = v.copy()
+            for col in df.columns:
+                if df[col].dtype == object:
+                    df[col] = df[col].apply(
+                        lambda x: x.isoformat() if isinstance(x, (datetime.date, datetime.datetime)) else x)
+            dataframes[k] = df.to_dict(orient="records")
+        elif isinstance(v, (datetime.date, datetime.datetime)):
+            values[k] = {"__date__": v.isoformat()}
+        else:
+            try:
+                json.dumps(v)
+                values[k] = v
+            except TypeError:
+                continue  # 無法序列化的內容（例如上傳元件本身）直接跳過
+    return {"exported_at": datetime.datetime.now().isoformat(), "dataframes": dataframes, "values": values}
+
+
+def _import_all_data(uploaded_file):
+    uploaded_file.seek(0)
+    data = json.load(uploaded_file)
+    for k, records in data.get("dataframes", {}).items():
+        df = pd.DataFrame(records)
+        for col in DATE_COLUMNS_BY_DF.get(k, []):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col]).dt.date
+        st.session_state[k] = df
+    for k, v in data.get("values", {}).items():
+        if isinstance(v, dict) and "__date__" in v:
+            st.session_state[k] = datetime.date.fromisoformat(v["__date__"])
+        else:
+            st.session_state[k] = v
+    # 清掉表格編輯元件的舊快取，強迫它們用剛匯入的新資料重新繪製
+    for k in list(st.session_state.keys()):
+        if k.endswith("_editor"):
+            del st.session_state[k]
+
+
+def module_data_management():
+    st.title("💾 資料存檔與讀取")
+    st.info("💡 本系統的資料只存在您目前瀏覽器的工作階段中，**關閉分頁或重新整理就會消失**。"
+            "建議每次告一段落時先下載備份檔；下次要繼續分析，重新上傳同一份檔案即可無縫接軌。")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("⬇️ 匯出備份")
+        client_name = ""
+        fam = st.session_state.get("family_df")
+        if fam is not None and len(fam):
+            self_row = fam[fam["關係"] == "本人"]
+            if len(self_row):
+                client_name = str(self_row.iloc[0]["姓名"])
+        fname = f"財務規劃備份_{client_name or '客戶'}_{datetime.date.today()}.json"
+
+        export_data = _export_all_data()
+        json_bytes = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+        st.download_button("📥 下載備份檔 (.json)", data=json_bytes, file_name=fname,
+                            mime="application/json", type="primary", use_container_width=True)
+        st.caption("涵蓋：家庭成員、財務目標、收支資產負債表（含調整後）、退休參數，"
+                   "以及各專題（退休/教育金/購屋購車/保險）已輸入的數字與顧問建議。")
+
+    with col2:
+        st.subheader("⬆️ 匯入備份")
+        uploaded = st.file_uploader("選擇先前下載的備份檔 (.json)", type=["json"], key="backup_uploader")
+        if uploaded is not None:
+            sig = f"{uploaded.name}_{uploaded.size}"
+            if st.session_state.get("_last_import_sig") != sig:
+                try:
+                    _import_all_data(uploaded)
+                    st.session_state["_last_import_sig"] = sig
+                    st.success("✅ 資料讀取成功！請至左側選單查看各項分析結果。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 檔案格式錯誤或內容不符，請確認上傳的是本系統匯出的 .json 備份檔。（{e}）")
+            else:
+                st.success("✅ 這份備份檔的資料已經讀取完成，可切換至左側選單查看。")
+        st.caption("⚠️ 匯入會覆蓋目前畫面上的資料，請先確認不需要目前的內容再上傳。")
+
+
+# ==========================================================
 # 客戶總覽報告（重點彙整，適合列印/分享）
 # ==========================================================
 def _health_metric_rows(sf):
@@ -832,6 +928,8 @@ def main():
     menu_selection = st.sidebar.radio(
         "請選擇操作模組：",
         [
+            "💾 資料存檔與讀取",
+            "-----------------------",
             "1. 基本資料輸入 (Step 1)",
             "2. 財務目標設定 (Step 2)",
             "3. 收支與資產負債 (Step 3)",
@@ -850,6 +948,7 @@ def main():
     st.sidebar.caption("版本：2026 財務試算網頁互動版 v2.0")
 
     pages = {
+        "💾 資料存檔與讀取": module_data_management,
         "1. 基本資料輸入 (Step 1)": step1_basic_info,
         "2. 財務目標設定 (Step 2)": step2_financial_goals,
         "3. 收支與資產負債 (Step 3)": step3_cash_flow_and_assets,
