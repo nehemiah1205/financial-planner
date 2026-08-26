@@ -51,6 +51,16 @@ GOAL_ROWS = [
     ("長期目標 (10年以上)", "信託規劃", False),
 ]
 
+# Step 2 勾選的目標項目 → 客戶總覽報告裡對應的試算類別，
+# 用來讓報告只顯示客戶「有勾選」的財務目標。
+GOAL_ITEM_TO_CATEGORY = {
+    "退休生活規劃": "retirement",
+    "子女教育金準備": "education",
+    "風險與保險規劃": "insurance",
+    "房屋頭期款準備": "house",
+    "購 / 換車": "car",
+}
+
 # ==========================================================
 # 共用工具函式
 # ==========================================================
@@ -100,6 +110,37 @@ def item_table(key, items, per_row_label="金額(年)", step=1000):
     return result, sum(result.values())
 
 
+def _guard_against_epoch_date_reset(edited_df, prev_df, date_col, suspicious_before=datetime.date(1925, 1, 1)):
+    """防呆：瀏覽器原生日期輸入框（DateColumn）有個已知怪癖——使用者用鍵盤編輯到一半
+    （例如只改了「年」還沒改完月/日）就被中斷（點別處、或畫面因其他元件觸發 rerun），
+    有時會把還沒打完的值直接提交成 1970-01-01（電腦日期系統的 Unix epoch 起始日），
+    導致原本正確的生日被悄悄覆蓋。
+
+    這裡的做法：只針對『既有列』（新增列不處理，因為新增列本來就還沒有舊值可比對），
+    如果新值落在一個明顯不合理的極早日期區間、且跟使用者上次確認過的舊值不同，
+    視為誤觸發，自動還原成舊值，並提示使用者留意。
+    """
+    if edited_df is None or prev_df is None or date_col not in edited_df.columns:
+        return edited_df
+    reverted_rows = []
+    for idx in edited_df.index:
+        if idx not in prev_df.index:
+            continue  # 新增的列，沒有舊值可比對，略過
+        new_val = edited_df.loc[idx, date_col]
+        old_val = prev_df.loc[idx, date_col]
+        if (isinstance(new_val, datetime.date) and isinstance(old_val, datetime.date)
+                and new_val != old_val and new_val < suspicious_before and old_val >= suspicious_before):
+            edited_df.loc[idx, date_col] = old_val
+            name = edited_df.loc[idx, "姓名"] if "姓名" in edited_df.columns else f"第{idx}列"
+            reverted_rows.append(str(name))
+    if reverted_rows:
+        st.warning(
+            f"⚠️ 偵測到「{'、'.join(reverted_rows)}」的生日被重置為異常的極早日期（可能是日期欄位編輯到一半時斷開造成），"
+            "已自動還原為原本的值。若您真的要修改生日，建議改用欄位右側的小日曆圖示點選，會比手動打字更穩定。"
+        )
+    return edited_df
+
+
 def get_family_df():
     if "family_df" not in st.session_state:
         st.session_state.family_df = pd.DataFrame({
@@ -146,29 +187,282 @@ def get_retire_params_df():
 
 
 # ==========================================================
+# 全站視覺主題（配色／字體／版面），與客戶總覽報告共用同一套設計語彙
+# ==========================================================
+_GLOBAL_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;700&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+/* 列印時隱藏側邊選單，方便客戶總覽報告直接輸出 PDF */
+@media print { section[data-testid="stSidebar"], .stSidebar { display:none !important; } }
+
+/* 手機／窄螢幕：讓並排欄位自動換行堆疊，避免被壓得太窄 */
+@media (max-width: 700px) {
+  div[data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+  div[data-testid="stHorizontalBlock"] > div[data-testid="column"] { min-width: 100% !important; flex: 1 1 100% !important; }
+}
+
+html, body, [data-testid="stAppViewContainer"] { font-family:'Noto Sans TC', sans-serif; }
+h1, h2, h3 { font-family:'Noto Serif TC', serif !important; color:#14213D !important; }
+
+section[data-testid="stSidebar"] { background:#14213D !important; }
+section[data-testid="stSidebar"] * { color:#F2F4F8 !important; }
+section[data-testid="stSidebar"] hr { border-color:rgba(255,255,255,.15) !important; }
+
+.fp-section-eyebrow{ display:flex; align-items:center; gap:10px; margin:10px 0 14px 0; }
+.fp-section-eyebrow .line{ flex:0 0 3px; align-self:stretch; background:#A9832B; border-radius:2px; min-height:22px; }
+.fp-section-eyebrow .txt{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:18px; color:#14213D; }
+
+.fp-wrap{ font-family:'Noto Sans TC', sans-serif; color:#1A2233; }
+.fp-banner{
+  background:linear-gradient(135deg,#14213D 0%,#1F3560 100%);
+  border-bottom:3px solid #A9832B; border-radius:10px;
+  padding:28px 32px; margin-bottom:28px;
+}
+.fp-eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.18em;
+  color:#C9A85C; text-transform:uppercase; margin-bottom:8px; }
+.fp-banner-title{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:26px; color:#FFFFFF; margin-bottom:8px; }
+.fp-banner-meta{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:#B7C2D6; }
+
+.fp-chiprow{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:6px; }
+.fp-chip{ display:flex; align-items:center; gap:10px; background:#FFFFFF; border:1px solid #E4E7EC;
+  border-radius:10px; padding:10px 14px; min-width:150px; }
+.fp-chip-icon{ font-size:20px; }
+.fp-chip-name{ font-weight:700; font-size:14px; }
+.fp-chip-meta{ font-size:12px; color:#5B6472; font-family:'IBM Plex Mono',monospace; }
+
+.fp-statrow{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:8px; }
+.fp-stat{ background:#FFFFFF; border:1px solid #E4E7EC; border-left:4px solid #A9832B;
+  border-radius:8px; padding:16px 18px; }
+.fp-stat-label{ font-size:12.5px; color:#5B6472; margin-bottom:6px; }
+.fp-stat-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:22px; color:#14213D; }
+
+.fp-gaugerow{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:8px; }
+.fp-gauge-card{ background:#FFFFFF; border:1px solid #E4E7EC; border-radius:8px; padding:16px 18px; }
+.fp-gauge-top{ display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+.fp-gauge-label{ font-size:13px; font-weight:700; color:#14213D; }
+.fp-gauge-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:20px; margin-bottom:10px; }
+.fp-gauge-track{ position:relative; height:8px; background:#EDEFF2; border-radius:4px; margin-bottom:6px; }
+.fp-gauge-ideal{ position:absolute; top:0; bottom:0; background:rgba(169,131,43,.28); border-radius:4px; }
+.fp-gauge-marker{ position:absolute; top:-4px; width:16px; height:16px; border-radius:50%;
+  transform:translateX(-50%); border:2px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,.12); }
+.fp-marker-good{ background:#2F7A4C; }
+.fp-marker-warn{ background:#B5790A; }
+.fp-gauge-scale{ font-size:11px; color:#5B6472; font-family:'IBM Plex Mono',monospace; }
+
+.fp-badge{ display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:99px; }
+.fp-badge-good{ background:#E6F2EA; color:#2F7A4C; }
+.fp-badge-warn{ background:#FBEEDD; color:#B5790A; }
+
+.fp-ledger{ background:#FFFFFF; border:1px solid #E4E7EC; border-radius:8px; overflow:hidden; margin-bottom:8px; }
+.fp-ledger-head, .fp-ledger-row{ display:grid; grid-template-columns:2fr 1.1fr 1.3fr; gap:10px; padding:11px 16px; align-items:center; }
+.fp-ledger-head{ background:#F7F7F5; font-size:12px; color:#5B6472; font-weight:700; }
+.fp-ledger-row{ border-top:1px solid #F0F1F3; border-left:4px solid transparent; font-size:13.5px; }
+.fp-ledger-row.warn{ border-left-color:#B5790A; }
+.fp-ledger-row.good{ border-left-color:#2F7A4C; }
+.fp-ledger-name{ font-weight:700; color:#14213D; }
+.fp-ledger-gap{ font-family:'IBM Plex Mono',monospace; }
+.fp-ledger-monthly{ font-family:'IBM Plex Mono',monospace; color:#5B6472; }
+
+.fp-note-card{ background:#FFFDF7; border:1px solid #EFE3C6; border-left:4px solid #A9832B;
+  border-radius:8px; padding:4px 6px 2px 6px; margin-bottom:10px; }
+
+.fp-footer{ font-size:11.5px; color:#98A2B3; text-align:center; margin-top:18px; padding-top:12px; border-top:1px solid #E4E7EC; }
+
+/* ==========================================================
+   全站介面美化（Step 頁面 / 專題頁面共用）
+   ========================================================== */
+
+/* 主背景：柔和米灰，讓白色卡片浮出層次 */
+[data-testid="stAppViewContainer"] > .main{ background:#F5F6F8; }
+[data-testid="stHeader"]{ background:rgba(245,246,248,0); }
+.block-container{ padding-top:1.6rem; padding-bottom:3rem; max-width:1180px; }
+
+/* 隱藏原生 st.title，改用 page_banner() 元件 */
+h1{ display:none; }
+
+/* 頁首橫幅（page_banner） */
+.fp-page-banner{
+  background:linear-gradient(135deg,#14213D 0%,#1F3560 100%);
+  border-radius:12px; padding:26px 30px; margin-bottom:26px;
+  border-bottom:3px solid #A9832B; box-shadow:0 4px 14px rgba(20,33,61,.14);
+}
+.fp-page-banner .icon{ font-size:26px; margin-right:4px; }
+.fp-page-banner .title{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:24px; color:#FFFFFF; display:inline; }
+.fp-page-banner .subtitle{ font-family:'Noto Sans TC',sans-serif; font-size:13.5px; color:#C7D0E0; margin-top:8px; line-height:1.6; }
+
+/* 內文區塊卡片化：st.container(border=True) 統一質感 */
+[data-testid="stVerticalBlockBorderWrapper"]{
+  background:#FFFFFF; border:1px solid #E4E7EC !important; border-radius:12px !important;
+  box-shadow:0 1px 3px rgba(20,33,61,.05);
+}
+
+/* 按鈕 */
+.stButton > button, .stDownloadButton > button, .stFormSubmitButton > button{
+  border-radius:8px !important; font-weight:600 !important; border:1px solid #D8DCE3 !important;
+  transition:all .15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover{
+  border-color:#A9832B !important; color:#A9832B !important;
+}
+button[kind="primary"], button[data-testid="stBaseButton-primary"]{
+  background:#14213D !important; border-color:#14213D !important; color:#fff !important;
+}
+button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover{
+  background:#1F3560 !important; border-color:#A9832B !important; color:#fff !important;
+}
+
+/* 提示框（info/success/warning/error）換成沉穩的卡片風格 */
+[data-testid="stAlert"]{ border-radius:10px !important; border:1px solid transparent; padding:14px 16px !important; }
+[data-testid="stAlertContainer"]{ border-radius:10px !important; }
+div[data-baseweb="notification"]{ border-radius:10px !important; }
+
+/* st.metric 卡片化 */
+[data-testid="stMetric"]{
+  background:#FFFFFF; border:1px solid #E4E7EC; border-left:4px solid #A9832B;
+  border-radius:8px; padding:14px 16px 10px 16px;
+}
+[data-testid="stMetricLabel"]{ font-size:12.5px !important; color:#5B6472 !important; }
+[data-testid="stMetricValue"]{ font-family:'IBM Plex Mono',monospace !important; color:#14213D !important; }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"]{ gap:4px; border-bottom:2px solid #E4E7EC; }
+.stTabs [data-baseweb="tab"]{
+  font-weight:600; color:#5B6472; border-radius:8px 8px 0 0; padding:8px 18px;
+}
+.stTabs [aria-selected="true"]{ color:#14213D !important; background:#EFE9DA !important; }
+
+/* Expander */
+[data-testid="stExpander"]{ border:1px solid #E4E7EC !important; border-radius:10px !important; overflow:hidden; }
+[data-testid="stExpander"] summary{ font-weight:600; color:#14213D; }
+
+/* data_editor / dataframe 表頭 */
+[data-testid="stDataFrame"] thead tr th, [data-testid="stDataEditorGrid"] thead tr th{
+  background:#14213D !important; color:#F2F4F8 !important;
+}
+
+/* 分隔線 */
+hr{ border-color:#E4E7EC !important; }
+
+/* 進度條 */
+[data-testid="stProgress"] > div > div{ background-color:#A9832B !important; }
+
+/* Slider */
+[data-testid="stSlider"] [role="slider"]{ background-color:#A9832B !important; border-color:#A9832B !important; }
+.stSlider [data-baseweb="slider"] > div > div{ background:#A9832B !important; }
+
+/* Sidebar 導覽選單：把 radio 選項變成側邊選單卡片 */
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p{ margin-bottom:0; }
+section[data-testid="stSidebar"] .stRadio > label{ display:none; }
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"]{ gap:2px; }
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label{
+  background:rgba(255,255,255,.04); border-radius:8px; padding:9px 10px !important; margin-bottom:2px;
+  transition:background .12s ease;
+}
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover{ background:rgba(255,255,255,.10); }
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label[data-checked="true"]{
+  background:rgba(169,131,43,.30) !important; border-left:3px solid #A9832B;
+}
+section[data-testid="stSidebar"] [data-testid="stProgress"] > div > div{ background-color:#A9832B !important; }
+section[data-testid="stSidebar"] [data-testid="stProgress"]{ background:rgba(255,255,255,.12); border-radius:6px; }
+
+.fp-sidebar-brand{ padding:4px 0 14px 0; }
+.fp-sidebar-brand .name{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:19px; color:#FFFFFF; }
+.fp-sidebar-brand .tag{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; letter-spacing:.14em;
+  color:#C9A85C; text-transform:uppercase; margin-top:2px; }
+</style>
+"""
+
+
+def inject_global_css():
+    st.markdown(_GLOBAL_CSS, unsafe_allow_html=True)
+
+
+def section_header(icon, text, top_margin=0):
+    """統一各頁「區塊標題」樣式：金色豎線 + 襯線字體，取代原本純文字的 st.subheader。"""
+    margin = f"margin-top:{top_margin}px;" if top_margin else ""
+    st.markdown(f'<div class="fp-section-eyebrow" style="{margin}"><div class="line"></div>'
+                f'<div class="txt">{icon} {text}</div></div>', unsafe_allow_html=True)
+
+
+def page_banner(icon, title, subtitle=""):
+    """統一各頁「頁首橫幅」樣式，取代原本的 st.title() + st.caption()。"""
+    sub_html = f'<div class="subtitle">{subtitle}</div>' if subtitle else ""
+    st.markdown(
+        f'<div class="fp-page-banner"><span class="icon">{icon}</span>'
+        f'<span class="title">{title}</span>{sub_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def kpi_card(label, value, note, status="good"):
+    """財務健康指標卡片：取代原本純文字的 st.success/error 訊息框。
+    status: good（金色/綠）｜ warn（琥珀）｜ bad（紅）｜ neutral（藍灰）"""
+    colors = {
+        "good": ("#2F7A4C", "#E6F2EA"),
+        "warn": ("#B5790A", "#FBEEDD"),
+        "bad": ("#B3261E", "#FBE9E7"),
+        "neutral": ("#3A5A8C", "#E9EFF8"),
+    }
+    fg, bg = colors.get(status, colors["neutral"])
+    st.markdown(
+        f'<div class="fp-stat" style="border-left-color:{fg};">'
+        f'<div class="fp-stat-label">{label}</div>'
+        f'<div class="fp-stat-value" style="color:{fg};">{value}</div>'
+        f'<div style="font-size:12px;color:#5B6472;margin-top:6px;'
+        f'display:inline-block;background:{bg};color:{fg};border-radius:99px;padding:2px 10px;">{note}</div>'
+        f'</div>', unsafe_allow_html=True,
+    )
+
+
+def _badge(status):
+    return f'<span class="fp-badge fp-badge-{status}">{"良好" if status == "good" else "需注意"}</span>'
+
+
+def _completion_map():
+    """判斷各頁是否已有實質輸入/試算結果，用於側邊選單的完成度標記。"""
+    fam = st.session_state.get("family_df")
+    goals = st.session_state.get("goals_df")
+    return {
+        "1. 基本資料輸入": fam is not None and len(fam) > 0,
+        "2. 財務目標設定": goals is not None and bool(goals["勾選"].any()) if goals is not None else False,
+        "3. 收支與資產負債": st.session_state.get("sf") is not None,
+        "4. 財務健康看板": st.session_state.get("sf") is not None,
+        "專題 A：退休規劃": st.session_state.get("ret_total_gap") is not None,
+        "專題 B：教育金試算": st.session_state.get("edu_total_gap") is not None,
+        "專題 C：購屋與購車": any(st.session_state.get(f"{p}_result") for p in ["hA", "hB", "hC", "cA", "cB", "cC"]),
+        "專題 D：保險缺口分析": st.session_state.get("ins_total_gap") is not None,
+    }
+
+
+# ==========================================================
 # Step 1：基本資料與參數
 # ==========================================================
 def step1_basic_info():
-    st.title("👨‍👩‍👧‍👦 Step 1：基本資料與參數設定")
-    st.caption("此頁資料會自動連動到後續所有試算專題（退休、教育金、保險缺口分析等）。")
+    page_banner("👨‍👩‍👧‍👦", "Step 1：基本資料與參數設定",
+                "此頁資料會自動連動到後續所有試算專題（退休、教育金、保險缺口分析等）。")
 
     ref_date = st.date_input("📅 客戶資料輸入日期", st.session_state.get("ref_date", datetime.date.today()))
     st.session_state.ref_date = ref_date
-    st.divider()
 
-    st.subheader("👥 家庭成員基本資料")
+    section_header("👥", "家庭成員基本資料", top_margin=20)
     st.info("💡 **表格操作**：雙擊儲存格可直接編輯；點表格最下方「+」新增一列；勾選最左側方塊後按 `Delete` 可刪除該列。")
 
+    prev_family_df = get_family_df().copy()
     edited_df = st.data_editor(
-        get_family_df(),
+        prev_family_df,
         column_config={
             "性別": st.column_config.SelectboxColumn("性別", options=["男", "女", "其他"], required=True),
-            "生日": st.column_config.DateColumn("生日", format="YYYY-MM-DD", required=True),
+            "生日": st.column_config.DateColumn(
+                "生日", format="YYYY-MM-DD", required=True,
+                min_value=datetime.date(1920, 1, 1), max_value=datetime.date.today(),
+            ),
             "關係": st.column_config.SelectboxColumn(
                 "關係", options=["本人", "配偶", "父親", "母親"] + CHILD_RELATIONS),
         },
         num_rows="dynamic", use_container_width=True, hide_index=True, key="family_editor",
     )
+    edited_df = _guard_against_epoch_date_reset(edited_df, prev_family_df, "生日")
     st.session_state.family_df = edited_df
 
     age_display = edited_df.copy()
@@ -176,8 +470,7 @@ def step1_basic_info():
     st.caption("目前年齡（依上方生日與資料輸入日期自動計算）")
     st.dataframe(age_display[["姓名", "年齡"]].set_index("姓名").T, use_container_width=True)
 
-    st.divider()
-    st.subheader("⚙️ 退休與經濟假設參數（依「本人 / 配偶」自動列出）")
+    section_header("⚙️", "退休與經濟假設參數（依「本人 / 配偶」自動列出）", top_margin=26)
     st.caption("此處設定的通膨率、投報率將直接套用於「專題 A：退休規劃」，兩處資料自動同步，不需重複輸入。")
     params_df = get_retire_params_df()
     edited_params = st.data_editor(
@@ -191,29 +484,28 @@ def step1_basic_info():
     )
     st.session_state.retire_params_df = edited_params
 
-    st.divider()
-    st.subheader("📝 客戶現況說明")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.session_state["note_family"] = st.text_area(
-            "🏠 家庭現況簡述", value=st.session_state.get("note_family",
-            "夫妻兩人育有一子一女尚在求學階段，父母皆健在不需負擔奉養金。去年年底購置新屋，每月房貸負擔約5萬元。"), height=130)
-        st.session_state["note_feeling"] = st.text_area(
-            "🤔 當前財務現況感覺", value=st.session_state.get("note_feeling",
-            "已開始工作多年並有記帳習慣，沒有豪奢消費，但帳戶現金存量不多，想重新檢視收支並針對財務目標擬定計畫。"), height=130)
-    with c2:
-        st.session_state["note_income"] = st.text_area(
-            "💼 工作收入現況簡述", value=st.session_state.get("note_income", "兩人皆在科技業工作發展穩定，總年收入約為200萬。"), height=130)
-        st.session_state["note_goal"] = st.text_area(
-            "🎯 未來財務目標想法", value=st.session_state.get("note_goal",
-            "提供子女大學畢業後100萬基金作為留學或創業之需，檢視現金流量清償房貸，同時為夫婦兩人做好退休準備。"), height=130)
-
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 竹耀通訊處"), key="firm")
-    with c2:
-        st.text_input("職稱", value=st.session_state.get("title", "處經理"), key="title")
+    section_header("📝", "客戶現況說明與顧問資訊", top_margin=26)
+    with st.expander("展開填寫客戶現況簡述、財務目標想法、顧問所屬單位等（選填，會顯示在客戶總覽報告）", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.session_state["note_family"] = st.text_area(
+                "🏠 家庭現況簡述", value=st.session_state.get("note_family",
+                "夫妻兩人育有一子一女尚在求學階段，父母皆健在不需負擔奉養金。去年年底購置新屋，每月房貸負擔約5萬元。"), height=130)
+            st.session_state["note_feeling"] = st.text_area(
+                "🤔 當前財務現況感覺", value=st.session_state.get("note_feeling",
+                "已開始工作多年並有記帳習慣，沒有豪奢消費，但帳戶現金存量不多，想重新檢視收支並針對財務目標擬定計畫。"), height=130)
+        with c2:
+            st.session_state["note_income"] = st.text_area(
+                "💼 工作收入現況簡述", value=st.session_state.get("note_income", "兩人皆在科技業工作發展穩定，總年收入約為200萬。"), height=130)
+            st.session_state["note_goal"] = st.text_area(
+                "🎯 未來財務目標想法", value=st.session_state.get("note_goal",
+                "提供子女大學畢業後100萬基金作為留學或創業之需，檢視現金流量清償房貸，同時為夫婦兩人做好退休準備。"), height=130)
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 竹耀通訊處"), key="firm")
+        with c2:
+            st.text_input("職稱", value=st.session_state.get("title", "處經理"), key="title")
 
     st.success("✅ 所有輸入即時自動儲存，可直接切換至左側其他頁面。")
 
@@ -222,8 +514,8 @@ def step1_basic_info():
 # Step 2：財務目標設定
 # ==========================================================
 def step2_financial_goals():
-    st.title("🎯 Step 2：財務目標設定")
-    st.markdown("請勾選您的財務目標，並填寫預計金額與用途說明。此表將作為後續各專題試算的優先順序參考。")
+    page_banner("🎯", "Step 2：財務目標設定",
+                "請勾選您的財務目標，並填寫預計金額與用途說明。此表將作為後續各專題試算的優先順序參考。")
 
     if "goals_df" not in st.session_state:
         st.session_state.goals_df = pd.DataFrame(
@@ -245,7 +537,7 @@ def step2_financial_goals():
     st.divider()
     selected = edited[edited["勾選"] == True]
     if len(selected):
-        st.subheader("📋 已選擇的財務目標總覽")
+        section_header("📋", "已選擇的財務目標總覽")
         for cat in ["短期目標 (0~5年)", "中期目標 (5~10年)", "長期目標 (10年以上)"]:
             rows = selected[selected["分類"] == cat]
             if len(rows):
@@ -302,8 +594,8 @@ def _cashflow_block(suffix=""):
 
 
 def step3_cash_flow_and_assets():
-    st.title("💵 Step 3：收支與資產負債表")
-    st.markdown("請輸入家庭年度收支與目前資產負債狀況，系統會自動計算總額、淨結餘，並同步至財務健康看板。")
+    page_banner("💵", "Step 3：收支與資產負債表",
+                "請輸入家庭年度收支與目前資產負債狀況，系統會自動計算總額、淨結餘，並同步至財務健康看板。")
 
     tab_now, tab_adj = st.tabs(["📌 現況", "🛠️ 調整後建議（可選）"])
     with tab_now:
@@ -324,7 +616,7 @@ def step3_cash_flow_and_assets():
 # Step 4：財務健康看板
 # ==========================================================
 def step4_financial_health_dashboard():
-    st.title("📊 Step 4：財務資料分析與四大帳戶")
+    page_banner("📊", "Step 4：財務資料分析與四大帳戶")
     sf = st.session_state.get("sf")
     if not sf:
         st.warning("⚠️ 尚未輸入 Step 3 收支與資產負債資料，請先完成 Step 3。")
@@ -347,55 +639,60 @@ def step4_financial_health_dashboard():
     assumed_return = st.slider("假設生息資產年化投報率 (%)，用於估算財務自由度", 0.0, 10.0, 4.0, 0.5) / 100
     financial_freedom = (investable_assets * assumed_return) / annual_expense if annual_expense > 0 else 0
 
-    st.subheader("💡 核心財務健康指標")
+    section_header("💡", "核心財務健康指標")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        (st.success if savings_rate > 25 else st.error)(f"儲蓄率\n\n**{savings_rate:.1f}%**\n\n理想值 >25%")
+        kpi_card("儲蓄率", f"{savings_rate:.1f}%", "理想值 >25%", "good" if savings_rate > 25 else "bad")
     with col2:
-        (st.success if debt_ratio <= 30 else st.warning)(f"負債比\n\n**{debt_ratio:.1f}%**\n\n理想值 ≤30%")
+        kpi_card("負債比", f"{debt_ratio:.1f}%", "理想值 ≤30%", "good" if debt_ratio <= 30 else "warn")
     with col3:
         if 3 <= emergency_months <= 6:
-            st.success(f"生活週轉金\n\n**{emergency_months:.1f} 個月**\n\n理想值 3~6個月")
+            kpi_card("生活週轉金", f"{emergency_months:.1f} 個月", "理想值 3~6個月", "good")
         elif emergency_months > 6:
-            st.info(f"生活週轉金\n\n**{emergency_months:.1f} 個月**\n\n資金略顯閒置")
+            kpi_card("生活週轉金", f"{emergency_months:.1f} 個月", "資金略顯閒置", "neutral")
         else:
-            st.error(f"生活週轉金\n\n**{emergency_months:.1f} 個月**\n\n準備不足")
+            kpi_card("生活週轉金", f"{emergency_months:.1f} 個月", "準備不足", "bad")
     with col4:
-        (st.success if financial_freedom > 1 else st.warning)(f"財務自由度\n\n**{financial_freedom:.2f}**\n\n理想值 >1.0")
+        kpi_card("財務自由度", f"{financial_freedom:.2f}", "理想值 >1.0", "good" if financial_freedom > 1 else "warn")
 
-    st.divider()
-    st.subheader("🗂️ 四大帳戶總覽")
+    section_header("🗂️", "四大帳戶總覽", top_margin=26)
     ins_gap = st.session_state.get("ins_total_gap")
+
+    def _asset_val(name):
+        adf = st.session_state.get("assets_df")
+        if adf is None:
+            return 0
+        row = adf[adf["項目"] == name]
+        return int(row["金額(年)"].iloc[0]) if len(row) else 0
+
     b1, b2, b3, b4 = st.columns(4)
-    with b1:
+    with b1, st.container(border=True):
         st.markdown("**💵 現金類帳戶**")
         st.caption("準備3~6個月緊急預備金與靈活現金（財務安全）")
         st.metric("現況", money(liquid_assets))
-    with b2:
+    with b2, st.container(border=True):
         st.markdown("**🛡️ 保障類帳戶**")
         st.caption("壽險、意外險、重大疾病、醫療險等生老病死缺口（財務安全）")
         st.metric("保障缺口", money(ins_gap) if ins_gap is not None else "尚未計算")
         if ins_gap is None:
             st.caption("請至「專題 D：保險缺口分析」計算")
-    with b3:
+    with b3, st.container(border=True):
         st.markdown("**🏦 理財類帳戶**")
         st.caption("定存、年金、養老保險（教育與養老金來源，財務獨立）")
-        st.metric("現況", money(st.session_state.get(f"assets", {}).get("保單現價", 0) +
-                                 st.session_state.get(f"assets", {}).get("定期存款", 0)))
-    with b4:
+        st.metric("現況", money(_asset_val("保單現價") + _asset_val("定期存款")))
+    with b4, st.container(border=True):
         st.markdown("**📈 投資類帳戶**")
         st.caption("股票、基金、債券等（創造非工資收入與財富，財務自由）")
-        st.metric("現況", money(st.session_state.get(f"assets", {}).get("有價證券", 0) +
-                                 st.session_state.get(f"assets", {}).get("基金", 0)))
+        st.metric("現況", money(_asset_val("有價證券") + _asset_val("基金")))
 
 
 # ==========================================================
 # 專題 A：退休規劃
 # ==========================================================
 def module_retirement():
-    st.title("🏖️ 專題 A：退休規劃試算")
-    st.markdown("依「終值 (FV)」與「年金 (PMT)」公式，考量通膨率，精算退休時的真實資金缺口。")
-    st.caption("通膨率、投報率等經濟假設已自Step 1 帶入，如需調整請回 Step 1 修改。")
+    page_banner("🏖️", "專題 A：退休規劃試算",
+                "依「終值 (FV)」與「年金 (PMT)」公式，考量通膨率，精算退休時的真實資金缺口。"
+                "通膨率、投報率等經濟假設已自 Step 1 帶入，如需調整請回 Step 1 修改。")
 
     params_df = get_retire_params_df()
     df = get_family_df()
@@ -412,16 +709,17 @@ def module_retirement():
 
         with cols[i]:
             st.subheader(f"{icon} {person}")
-            retire_age = st.number_input("預計退休年齡", value=int(row["退休年齡"]), key=f"rt_age_{person}")
-            retire_years = st.number_input("預計退休生活年期", value=int(row["養老年期"]), key=f"rt_years_{person}")
+            with st.form(key=f"rt_form_{person}"):
+                retire_age = st.number_input("預計退休年齡", value=int(row["退休年齡"]), key=f"rt_age_{person}")
+                retire_years = st.number_input("預計退休生活年期", value=int(row["養老年期"]), key=f"rt_years_{person}")
+                pv_expense = st.number_input("預計退休每月所需生活費 (現值/元)", value=30000, step=5000, key=f"rt_pv_{person}")
+                prepared_pv = st.number_input("目前已準備退休金 (現值/元)", value=0, step=50000, key=f"rt_prep_{person}")
+                social_ins = st.number_input("預估社會保險/其他已備資金 (退休時值/元)", value=0, step=100000, key=f"rt_social_{person}")
+                st.form_submit_button("🔄 更新試算結果", use_container_width=True)
+
             work_years = max(0, retire_age - cur_age)
             inflation = row["通貨膨脹率(%)"] / 100
             invest_rate = row["工作期間投報率(%)"] / 100
-
-            pv_expense = st.number_input("預計退休每月所需生活費 (現值/元)", value=30000, step=5000, key=f"rt_pv_{person}")
-            prepared_pv = st.number_input("目前已準備退休金 (現值/元)", value=0, step=50000, key=f"rt_prep_{person}")
-            social_ins = st.number_input("預估社會保險/其他已備資金 (退休時值/元)", value=0, step=100000, key=f"rt_social_{person}")
-            st.divider()
 
             fv_expense = fv(pv_expense, inflation, work_years)
             total_needed = fv_expense * 12 * retire_years
@@ -466,8 +764,8 @@ def _education_level_block(prefix, label, default_years, default_choice):
 
 
 def module_education():
-    st.title("🎓 專題 B：教育金試算")
-    st.markdown("每位子女分別試算大學／碩士／博士三階段教育金需求，支援自訂學程費用。")
+    page_banner("🎓", "專題 B：教育金試算",
+                "每位子女分別試算大學／碩士／博士三階段教育金需求，支援自訂學程費用。")
 
     df = get_family_df()
     children_df = df[df["關係"].isin(CHILD_RELATIONS)].reset_index(drop=True)
@@ -477,9 +775,10 @@ def module_education():
         st.warning("尚未於 Step 1 新增子女資料。")
         return
 
-    st.sidebar.markdown("### 📈 教育金環境參數")
-    inflation_rate = st.sidebar.number_input("學費預估通膨率 (%)", value=3.0, step=0.5, key="edu_inf") / 100
-    return_rate = st.sidebar.number_input("教育基金投資報酬率 (%)", value=5.0, step=0.5, key="edu_ret") / 100
+    with st.expander("⚙️ 環境假設（學費通膨率／教育基金投報率）", expanded=False):
+        c1, c2 = st.columns(2)
+        inflation_rate = c1.number_input("學費預估通膨率 (%)", value=3.0, step=0.5, key="edu_inf") / 100
+        return_rate = c2.number_input("教育基金投資報酬率 (%)", value=5.0, step=0.5, key="edu_ret") / 100
 
     n = min(len(children_df), 4)
     cols = st.columns(n)
@@ -491,16 +790,18 @@ def module_education():
         cur_age = age_from_dob(c["生日"], ref_date)
         with cols[i]:
             st.subheader(f"{icon} {c['姓名']}")
-            current_age = st.number_input("目前年齡", value=int(cur_age), step=1, key=f"edu_age_{i}")
-            college_age = st.number_input("預計就讀大學年齡", value=18, step=1, key=f"edu_cage_{i}")
-            prepared = st.number_input("目前已準備教育金", value=0, step=50000, key=f"edu_prep_{i}")
-            years_to_prep = max(0, college_age - current_age)
+            with st.form(key=f"edu_form_{i}"):
+                current_age = st.number_input("目前年齡", value=int(cur_age), step=1, key=f"edu_age_{i}")
+                college_age = st.number_input("預計就讀大學年齡", value=18, step=1, key=f"edu_cage_{i}")
+                prepared = st.number_input("目前已準備教育金", value=0, step=50000, key=f"edu_prep_{i}")
 
-            pv_total = 0
-            pv_total += _education_level_block(f"edu_{i}_u", "大學", 4, "國內私立大學")
-            pv_total += _education_level_block(f"edu_{i}_m", "碩士", 2, "國外研究所")
-            pv_total += _education_level_block(f"edu_{i}_p", "博士", 0, "不選擇")
-            st.divider()
+                pv_total = 0
+                pv_total += _education_level_block(f"edu_{i}_u", "大學", 4, "國內私立大學")
+                pv_total += _education_level_block(f"edu_{i}_m", "碩士", 2, "國外研究所")
+                pv_total += _education_level_block(f"edu_{i}_p", "博士", 0, "不選擇")
+                st.form_submit_button("🔄 更新試算結果", use_container_width=True)
+
+            years_to_prep = max(0, college_age - current_age)
 
             if years_to_prep > 0:
                 total_fv = fv(pv_total, inflation_rate, years_to_prep)
@@ -530,13 +831,16 @@ def module_education():
 def _big_purchase_plan(prefix, plan_label, default_price, default_years,
                         default_prepared, default_old_asset, is_house=True):
     st.markdown(f"##### {plan_label}")
-    years = st.number_input("預計時間 (年)", value=default_years, step=1, key=f"{prefix}_y")
-    price_pv = st.number_input("目標市價 (現值)", value=default_price, step=100000, key=f"{prefix}_price")
-    prepared_pv = st.number_input("目前已備資金 (現值)", value=default_prepared, step=50000, key=f"{prefix}_prep")
-    old_pv = st.number_input("舊資產折抵現值 (舊換新可填)", value=default_old_asset, step=50000, key=f"{prefix}_old")
-    loan_ratio = st.slider("預計貸款成數 (%)", 0, 100, 80 if is_house else 0, 5, key=f"{prefix}_lr") / 100
-    loan_years = st.number_input("貸款年期", value=30 if is_house else 5, step=1, key=f"{prefix}_ly")
-    loan_rate = st.number_input("貸款利率 (%)", value=2.1 if is_house else 3.5, step=0.1, key=f"{prefix}_lrate") / 100
+    with st.form(key=f"{prefix}_form"):
+        years = st.number_input("預計時間 (年)", value=default_years, step=1, key=f"{prefix}_y")
+        price_pv = st.number_input("目標市價 (現值)", value=default_price, step=100000, key=f"{prefix}_price")
+        prepared_pv = st.number_input("目前已備資金 (現值)", value=default_prepared, step=50000, key=f"{prefix}_prep")
+        old_pv = st.number_input("舊資產折抵現值 (舊換新可填)", value=default_old_asset, step=50000, key=f"{prefix}_old")
+        loan_ratio = st.slider("預計貸款成數 (%)", 0, 100, 80 if is_house else 0, 5, key=f"{prefix}_lr") / 100
+        loan_years = st.number_input("貸款年期", value=30 if is_house else 5, step=1, key=f"{prefix}_ly")
+        loan_rate = st.number_input("貸款利率 (%)", value=2.1 if is_house else 3.5, step=0.1, key=f"{prefix}_lrate") / 100
+        st.form_submit_button("🔄 更新試算", use_container_width=True)
+
     return_rate = st.session_state.get(f"{prefix}_ret_rate", 0.06)
 
     price_fv = fv(price_pv, st.session_state.get(f"{prefix}_infl", 0.03), years)
@@ -571,13 +875,15 @@ def _big_purchase_plan(prefix, plan_label, default_price, default_years,
 
 
 def module_house_and_car():
-    st.title("🏠🚗 專題 C：購屋與購車試算")
-    st.markdown("同時比較 A / B / C 三種計畫的頭期款缺口與每月還款負擔。")
+    page_banner("🏠🚗", "專題 C：購屋與購車試算",
+                "同時比較 A / B / C 三種計畫的頭期款缺口與每月還款負擔。")
 
     tab_house, tab_car = st.tabs(["🏠 購屋規劃", "🚗 購(換)車規劃"])
     with tab_house:
-        inflation_rate = st.sidebar.number_input("房價預估通膨率 (%)", value=3.0, step=0.5, key="house_infl") / 100
-        return_rate = st.sidebar.number_input("自備款投資報酬率 (%)", value=6.0, step=0.5, key="house_ret") / 100
+        with st.expander("⚙️ 環境假設（房價通膨率／自備款投報率）", expanded=False):
+            c1, c2 = st.columns(2)
+            inflation_rate = c1.number_input("房價預估通膨率 (%)", value=3.0, step=0.5, key="house_infl") / 100
+            return_rate = c2.number_input("自備款投資報酬率 (%)", value=6.0, step=0.5, key="house_ret") / 100
         for p in ["hA", "hB", "hC"]:
             st.session_state[f"{p}_infl"] = inflation_rate
             st.session_state[f"{p}_ret_rate"] = return_rate
@@ -590,8 +896,10 @@ def module_house_and_car():
                 _big_purchase_plan(prefix, label, price, yrs, prep, old, is_house=True)
 
     with tab_car:
-        inflation_rate_c = st.sidebar.number_input("車價預估通膨率 (%)", value=3.0, step=0.5, key="car_infl") / 100
-        return_rate_c = st.sidebar.number_input("自備款投資報酬率 (%) ", value=6.0, step=0.5, key="car_ret") / 100
+        with st.expander("⚙️ 環境假設（車價通膨率／自備款投報率）", expanded=False):
+            c1, c2 = st.columns(2)
+            inflation_rate_c = c1.number_input("車價預估通膨率 (%)", value=3.0, step=0.5, key="car_infl") / 100
+            return_rate_c = c2.number_input("自備款投資報酬率 (%) ", value=6.0, step=0.5, key="car_ret") / 100
         for p in ["cA", "cB", "cC"]:
             st.session_state[f"{p}_infl"] = inflation_rate_c
             st.session_state[f"{p}_ret_rate"] = return_rate_c
@@ -608,56 +916,62 @@ def module_house_and_car():
 # 專題 D：保險缺口分析
 # ==========================================================
 def module_insurance():
-    st.title("🛡️ 專題 D：保險缺口分析")
+    page_banner("🛡️", "專題 D：保險缺口分析")
 
     names = get_person_names()
     name = st.selectbox("選擇分析對象", names, key="ins_person")
 
-    st.subheader("一、壽險保障分析")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**應備金額**")
-        l_living_yr = st.number_input("家人生活費用 (每年)", 0, step=10000, key="l_living_yr")
-        l_living_n = st.number_input("需照顧年期", 0, step=1, value=10, key="l_living_n")
-        l_par = st.number_input("本人父母孝養金 (總額)", 0, step=10000, key="l_par")
-        l_mort = st.number_input("房貸餘額", 0, step=100000, key="l_mort")
-        l_oth = st.number_input("其他貸款餘額", 0, step=10000, key="l_oth")
-        l_fin = st.number_input("最後費用（喪葬等）", 0, step=10000, key="l_fin")
-        total_l_need = l_living_yr * l_living_n + l_par + l_mort + l_oth + l_fin
-        st.metric("應備總額", money(total_l_need))
-    with c2:
-        st.markdown("**已備保額**")
-        l_term = st.number_input("定期壽險保額", 0, step=100000, key="l_term")
-        l_whole = st.number_input("終身壽險保額", 0, step=100000, key="l_whole")
-        l_labor = st.number_input("勞保／國保身故給付", 0, step=100000, key="l_labor")
-        l_gov = st.number_input("軍公教保額", 0, step=100000, key="l_gov")
-        total_l_exist = l_term + l_whole + l_labor + l_gov
-        life_gap = max(0, total_l_need - total_l_exist)
-        st.metric("壽險缺口", money(life_gap))
+    section_header("①", "壽險保障分析")
+    with st.form("life_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**應備金額**")
+            l_living_yr = st.number_input("家人生活費用 (每年)", 0, step=10000, key="l_living_yr")
+            l_living_n = st.number_input("需照顧年期", 0, step=1, value=10, key="l_living_n")
+            l_par = st.number_input("本人父母孝養金 (總額)", 0, step=10000, key="l_par")
+            l_mort = st.number_input("房貸餘額", 0, step=100000, key="l_mort")
+            l_oth = st.number_input("其他貸款餘額", 0, step=10000, key="l_oth")
+            l_fin = st.number_input("最後費用（喪葬等）", 0, step=10000, key="l_fin")
+        with c2:
+            st.markdown("**已備保額**")
+            l_term = st.number_input("定期壽險保額", 0, step=100000, key="l_term")
+            l_whole = st.number_input("終身壽險保額", 0, step=100000, key="l_whole")
+            l_labor = st.number_input("勞保／國保身故給付", 0, step=100000, key="l_labor")
+            l_gov = st.number_input("軍公教保額", 0, step=100000, key="l_gov")
+        st.form_submit_button("🔄 更新試算", use_container_width=True)
 
-    st.divider()
-    st.subheader("二、意外險保障分析")
-    c3, c4 = st.columns(2)
-    with c3:
-        st.markdown("**應備金額**")
-        a_dis = st.number_input("生活費用(殘扶) (每年)", 0, step=10000, key="a_dis")
-        a_liv = st.number_input("家人生活費用 (每年)", 0, step=10000, key="a_liv")
-        a_par = st.number_input("本人父母孝養金 (總額)", 0, step=10000, key="a_par")
-        a_mort = st.number_input("房貸餘額", 0, step=100000, key="a_mort")
-        a_oth = st.number_input("其他貸款", 0, step=10000, key="a_oth")
-        total_a_need = a_dis + a_liv + a_par + a_mort + a_oth
-        st.metric("應備總額", money(total_a_need))
-    with c4:
-        st.markdown("**已備保額**")
-        a_grp = st.number_input("團體意外險保額", 0, step=100000, key="a_grp")
-        a_gov = st.number_input("軍公教保額", 0, step=100000, key="a_gov2")
-        a_com = st.number_input("商業保險保額", 0, step=100000, key="a_com")
-        total_a_exist = a_grp + a_gov + a_com
-        acc_gap = max(0, total_a_need - total_a_exist)
-        st.metric("意外險缺口", money(acc_gap))
+    total_l_need = l_living_yr * l_living_n + l_par + l_mort + l_oth + l_fin
+    total_l_exist = l_term + l_whole + l_labor + l_gov
+    life_gap = max(0, total_l_need - total_l_exist)
+    m1, m2 = st.columns(2)
+    m1.metric("應備總額", money(total_l_need))
+    m2.metric("壽險缺口", money(life_gap))
 
-    st.divider()
-    st.subheader("三、住院日額保障分析")
+    section_header("②", "意外險保障分析", top_margin=26)
+    with st.form("accident_form"):
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown("**應備金額**")
+            a_dis = st.number_input("生活費用(殘扶) (每年)", 0, step=10000, key="a_dis")
+            a_liv = st.number_input("家人生活費用 (每年)", 0, step=10000, key="a_liv")
+            a_par = st.number_input("本人父母孝養金 (總額)", 0, step=10000, key="a_par")
+            a_mort = st.number_input("房貸餘額", 0, step=100000, key="a_mort")
+            a_oth = st.number_input("其他貸款", 0, step=10000, key="a_oth")
+        with c4:
+            st.markdown("**已備保額**")
+            a_grp = st.number_input("團體意外險保額", 0, step=100000, key="a_grp")
+            a_gov = st.number_input("軍公教保額", 0, step=100000, key="a_gov2")
+            a_com = st.number_input("商業保險保額", 0, step=100000, key="a_com")
+        st.form_submit_button("🔄 更新試算", use_container_width=True)
+
+    total_a_need = a_dis + a_liv + a_par + a_mort + a_oth
+    total_a_exist = a_grp + a_gov + a_com
+    acc_gap = max(0, total_a_need - total_a_exist)
+    m3, m4 = st.columns(2)
+    m3.metric("應備總額", money(total_a_need))
+    m4.metric("意外險缺口", money(acc_gap))
+
+    section_header("③", "住院日額保障分析", top_margin=26)
     people_cols = ["本人", "配偶", "子女1", "子女2"]
     if "hosp_need_df" not in st.session_state:
         st.session_state.hosp_need_df = pd.DataFrame({
@@ -671,12 +985,15 @@ def module_insurance():
     need_total = {p: int(need_edit[p].sum()) for p in people_cols}
     st.dataframe(pd.DataFrame([need_total], index=["應備日額總計"]), use_container_width=True)
 
-    d1, d2 = st.columns(2)
-    with d1:
-        d_whole = st.number_input("終身日額", 0, step=500, key="d_whole")
-        d_term = st.number_input("定期日額", 0, step=500, key="d_term")
-    with d2:
-        d_real = st.number_input("實支實付（換算日額）", 0, step=500, key="d_real")
+    with st.form("hosp_form"):
+        d1, d2 = st.columns(2)
+        with d1:
+            d_whole = st.number_input("終身日額", 0, step=500, key="d_whole")
+            d_term = st.number_input("定期日額", 0, step=500, key="d_term")
+        with d2:
+            d_real = st.number_input("實支實付（換算日額）", 0, step=500, key="d_real")
+        st.form_submit_button("🔄 更新試算", use_container_width=True)
+
     total_d_exist = d_whole + d_term + d_real
     hosp_gap = max(0, need_total.get("本人", 0) - total_d_exist)
     st.metric("住院日額缺口（本人）", f"{hosp_gap:,.0f} 元/日")
@@ -690,13 +1007,19 @@ def module_insurance():
 # 記錄哪些 DataFrame 欄位是日期型別，匯出/匯入時需要特別轉換
 DATE_COLUMNS_BY_DF = {"family_df": ["生日"]}
 
+# 這些 key 屬於 Streamlit 元件在『本次畫面』就已經建立好的狀態（例如側邊選單本身），
+# 在「資料存檔與讀取」頁面執行匯入時，該元件已經 render 過了，此時若再用
+# session_state 覆寫會被 Streamlit 擋下並丟出例外。所以匯出時就不打包這些 key，
+# 匯入時也一律略過（即使是舊版備份檔裡帶有這個欄位，也不會讓匯入失敗）。
+_BACKUP_SKIP_KEYS = {"nav_radio", "backup_uploader", "_last_import_sig"}
+
 
 def _export_all_data():
     """掃描目前 session_state，自動打包所有『使用者資料』(不含 Streamlit 內部元件狀態)。
     採用自動掃描而非手動列出每個欄位，這樣以後新增頁面/欄位也不用再回來維護這個函式。"""
     dataframes, values = {}, {}
     for k, v in list(st.session_state.items()):
-        if k.endswith("_editor") or k == "backup_uploader":
+        if k.endswith("_editor") or k in _BACKUP_SKIP_KEYS:
             continue  # Streamlit 元件自身的內部狀態，不屬於使用者資料，跳過
         if isinstance(v, pd.DataFrame):
             df = v.copy()
@@ -719,25 +1042,37 @@ def _export_all_data():
 def _import_all_data(uploaded_file):
     uploaded_file.seek(0)
     data = json.load(uploaded_file)
+    skipped = []
     for k, records in data.get("dataframes", {}).items():
-        df = pd.DataFrame(records)
-        for col in DATE_COLUMNS_BY_DF.get(k, []):
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col]).dt.date
-        st.session_state[k] = df
+        if k in _BACKUP_SKIP_KEYS:
+            continue
+        try:
+            df = pd.DataFrame(records)
+            for col in DATE_COLUMNS_BY_DF.get(k, []):
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col]).dt.date
+            st.session_state[k] = df
+        except Exception:
+            skipped.append(k)
     for k, v in data.get("values", {}).items():
-        if isinstance(v, dict) and "__date__" in v:
-            st.session_state[k] = datetime.date.fromisoformat(v["__date__"])
-        else:
-            st.session_state[k] = v
+        if k in _BACKUP_SKIP_KEYS:
+            continue
+        try:
+            if isinstance(v, dict) and "__date__" in v:
+                st.session_state[k] = datetime.date.fromisoformat(v["__date__"])
+            else:
+                st.session_state[k] = v
+        except Exception:
+            skipped.append(k)  # 例如該元件本次畫面已建立、暫時無法覆寫，略過即可，不影響其他欄位
     # 清掉表格編輯元件的舊快取，強迫它們用剛匯入的新資料重新繪製
     for k in list(st.session_state.keys()):
         if k.endswith("_editor"):
             del st.session_state[k]
+    return skipped
 
 
 def module_data_management():
-    st.title("💾 資料存檔與讀取")
+    page_banner("💾", "資料存檔與讀取")
     st.info("💡 本系統的資料只存在您目前瀏覽器的工作階段中，**關閉分頁或重新整理就會消失**。"
             "建議每次告一段落時先下載備份檔；下次要繼續分析，重新上傳同一份檔案即可無縫接軌。")
 
@@ -815,6 +1150,17 @@ def _health_metric_configs(sf):
     return configs
 
 
+def _selected_goal_categories():
+    """讀取 Step 2 勾選的財務目標，回傳報告要顯示的類別集合。
+    若使用者根本還沒去過 Step 2（goals_df 不存在），回傳 None，
+    代表『沒有設定過』，此時報告先顯示所有已試算的項目，避免報告整個空白。"""
+    goals = st.session_state.get("goals_df")
+    if goals is None:
+        return None
+    selected_items = set(goals[goals["勾選"] == True]["項目"].tolist())
+    return {cat for item, cat in GOAL_ITEM_TO_CATEGORY.items() if item in selected_items}
+
+
 def _pick_plan_result(label, keys):
     options = {k: st.session_state.get(f"{k}_result") for k in keys if st.session_state.get(f"{k}_result")}
     if not options:
@@ -852,80 +1198,7 @@ def build_summary_text(fam_display, sf, health_configs, goal_rows, advisor_note)
     return "\n".join(lines)
 
 
-_REPORT_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;700&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
-@media print { section[data-testid="stSidebar"], .stSidebar { display:none !important; } }
-
-.fp-wrap { font-family:'Noto Sans TC', sans-serif; color:#1A2233; }
-.fp-banner{
-  background:linear-gradient(135deg,#14213D 0%,#1F3560 100%);
-  border-bottom:3px solid #A9832B; border-radius:10px;
-  padding:28px 32px; margin-bottom:28px;
-}
-.fp-eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.18em;
-  color:#C9A85C; text-transform:uppercase; margin-bottom:8px; }
-.fp-banner-title{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:26px; color:#FFFFFF; margin-bottom:8px; }
-.fp-banner-meta{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:#B7C2D6; }
-
-.fp-section-eyebrow{ display:flex; align-items:center; gap:10px; margin:8px 0 14px 0; }
-.fp-section-eyebrow .line{ flex:0 0 3px; align-self:stretch; background:#A9832B; border-radius:2px; }
-.fp-section-eyebrow .txt{ font-family:'Noto Serif TC',serif; font-weight:700; font-size:18px; color:#14213D; }
-
-.fp-chiprow{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:6px; }
-.fp-chip{ display:flex; align-items:center; gap:10px; background:#FFFFFF; border:1px solid #E4E7EC;
-  border-radius:10px; padding:10px 14px; min-width:150px; }
-.fp-chip-icon{ font-size:20px; }
-.fp-chip-name{ font-weight:700; font-size:14px; }
-.fp-chip-meta{ font-size:12px; color:#5B6472; font-family:'IBM Plex Mono',monospace; }
-
-.fp-statrow{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:8px; }
-.fp-stat{ background:#FFFFFF; border:1px solid #E4E7EC; border-left:4px solid #A9832B;
-  border-radius:8px; padding:16px 18px; }
-.fp-stat-label{ font-size:12.5px; color:#5B6472; margin-bottom:6px; }
-.fp-stat-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:22px; color:#14213D; }
-
-.fp-gaugerow{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:8px; }
-.fp-gauge-card{ background:#FFFFFF; border:1px solid #E4E7EC; border-radius:8px; padding:16px 18px; }
-.fp-gauge-top{ display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
-.fp-gauge-label{ font-size:13px; font-weight:700; color:#14213D; }
-.fp-gauge-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:20px; margin-bottom:10px; }
-.fp-gauge-track{ position:relative; height:8px; background:#EDEFF2; border-radius:4px; margin-bottom:6px; }
-.fp-gauge-ideal{ position:absolute; top:0; bottom:0; background:rgba(169,131,43,.28); border-radius:4px; }
-.fp-gauge-marker{ position:absolute; top:-4px; width:16px; height:16px; border-radius:50%;
-  transform:translateX(-50%); border:2px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,.12); }
-.fp-marker-good{ background:#2F7A4C; }
-.fp-marker-warn{ background:#B5790A; }
-.fp-gauge-scale{ font-size:11px; color:#5B6472; font-family:'IBM Plex Mono',monospace; }
-
-.fp-badge{ display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:99px; }
-.fp-badge-good{ background:#E6F2EA; color:#2F7A4C; }
-.fp-badge-warn{ background:#FBEEDD; color:#B5790A; }
-
-.fp-ledger{ background:#FFFFFF; border:1px solid #E4E7EC; border-radius:8px; overflow:hidden; margin-bottom:8px; }
-.fp-ledger-head, .fp-ledger-row{ display:grid; grid-template-columns:2fr 1.1fr 1.3fr; gap:10px; padding:11px 16px; align-items:center; }
-.fp-ledger-head{ background:#F7F7F5; font-size:12px; color:#5B6472; font-weight:700; }
-.fp-ledger-row{ border-top:1px solid #F0F1F3; border-left:4px solid transparent; font-size:13.5px; }
-.fp-ledger-row.warn{ border-left-color:#B5790A; }
-.fp-ledger-row.good{ border-left-color:#2F7A4C; }
-.fp-ledger-name{ font-weight:700; color:#14213D; }
-.fp-ledger-gap{ font-family:'IBM Plex Mono',monospace; }
-.fp-ledger-monthly{ font-family:'IBM Plex Mono',monospace; color:#5B6472; }
-
-.fp-note-card{ background:#FFFDF7; border:1px solid #EFE3C6; border-left:4px solid #A9832B;
-  border-radius:8px; padding:4px 6px 2px 6px; margin-bottom:10px; }
-
-.fp-footer{ font-size:11.5px; color:#98A2B3; text-align:center; margin-top:18px; padding-top:12px; border-top:1px solid #E4E7EC; }
-</style>
-"""
-
-
-def _badge(status):
-    return f'<span class="fp-badge fp-badge-{status}">{"良好" if status == "good" else "需注意"}</span>'
-
-
 def summary_report_page():
-    st.markdown(_REPORT_CSS, unsafe_allow_html=True)
     st.markdown('<div class="fp-wrap">', unsafe_allow_html=True)
 
     ref_date = st.session_state.get("ref_date", datetime.date.today())
@@ -982,25 +1255,34 @@ def summary_report_page():
         st.info("尚未輸入 Step 3 收支與資產負債資料。")
 
     st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">🎯 各項財務目標缺口彙總</div></div>', unsafe_allow_html=True)
+    selected_categories = _selected_goal_categories()
+    if selected_categories is not None:
+        st.caption("💡 僅顯示您在「Step 2 財務目標設定」中有勾選的項目；若要顯示其他項目，請回 Step 2 勾選。")
+
+    def _wanted(cat):
+        return selected_categories is None or cat in selected_categories
+
     goal_rows = []
     ret_gap, ret_monthly = st.session_state.get("ret_total_gap"), st.session_state.get("ret_total_monthly")
-    if ret_gap is not None:
+    if ret_gap is not None and _wanted("retirement"):
         goal_rows.append(["退休規劃", money(ret_gap), f"{money(ret_monthly)}/月" if ret_monthly else "-"])
     edu_gap, edu_monthly = st.session_state.get("edu_total_gap"), st.session_state.get("edu_total_monthly")
-    if edu_gap is not None:
+    if edu_gap is not None and _wanted("education"):
         goal_rows.append(["子女教育金", money(edu_gap), f"{money(edu_monthly)}/月" if edu_monthly else "-"])
     ins_gap = st.session_state.get("ins_total_gap")
-    if ins_gap is not None:
+    if ins_gap is not None and _wanted("insurance"):
         goal_rows.append(["保障缺口（壽險＋意外險）", money(ins_gap), "依缺口規劃保費" if ins_gap > 0 else "-"])
 
-    house_r = _pick_plan_result("選擇要顯示的購屋計畫", ["hA", "hB", "hC"])
-    if house_r:
-        goal_rows.append([f"購屋（{house_r['label']}）", money(house_r["gap"]),
-                           f"{money(house_r['monthly'])}/月" if house_r["gap"] > 0 else "資金充足"])
-    car_r = _pick_plan_result("選擇要顯示的購車計畫", ["cA", "cB", "cC"])
-    if car_r:
-        goal_rows.append([f"購車（{car_r['label']}）", money(car_r["gap"]),
-                           f"{money(car_r['monthly'])}/月" if car_r["gap"] > 0 else "資金充足"])
+    if _wanted("house"):
+        house_r = _pick_plan_result("選擇要顯示的購屋計畫", ["hA", "hB", "hC"])
+        if house_r:
+            goal_rows.append([f"購屋（{house_r['label']}）", money(house_r["gap"]),
+                               f"{money(house_r['monthly'])}/月" if house_r["gap"] > 0 else "資金充足"])
+    if _wanted("car"):
+        car_r = _pick_plan_result("選擇要顯示的購車計畫", ["cA", "cB", "cC"])
+        if car_r:
+            goal_rows.append([f"購車（{car_r['label']}）", money(car_r["gap"]),
+                               f"{money(car_r['monthly'])}/月" if car_r["gap"] > 0 else "資金充足"])
 
     if goal_rows:
         rows_html = "".join(
@@ -1014,7 +1296,10 @@ def summary_report_page():
           {rows_html}
         </div>""", unsafe_allow_html=True)
     else:
-        st.info("尚未計算任何專題試算，請先至左側「專題 A~D」完成試算後再回到本頁。")
+        if selected_categories is not None and not selected_categories:
+            st.info("您在「Step 2 財務目標設定」尚未勾選任何目標，所以沒有項目可顯示。請回 Step 2 勾選後再回到本頁。")
+        else:
+            st.info("尚未計算任何專題試算，請先至左側「專題 A~D」完成試算後再回到本頁。")
 
     st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">📝 顧問建議</div></div>', unsafe_allow_html=True)
     st.markdown('<div class="fp-note-card">', unsafe_allow_html=True)
@@ -1039,30 +1324,42 @@ def summary_report_page():
 # 側邊欄導航
 # ==========================================================
 def main():
-    st.sidebar.title("💰 財務規劃系統")
+    inject_global_css()
+
+    st.sidebar.markdown(
+        '<div class="fp-sidebar-brand"><div class="name">💰 財務規劃系統</div>'
+        '<div class="tag">Family Wealth Planning</div></div>', unsafe_allow_html=True)
+    completion = _completion_map()
+    done_n, total_n = sum(completion.values()), len(completion)
+    st.sidebar.progress(done_n / total_n if total_n else 0)
+    st.sidebar.caption(f"整體完成度：{done_n}/{total_n} 個步驟已有資料")
     st.sidebar.markdown("---")
 
-    menu_selection = st.sidebar.radio(
-        "請選擇操作模組：",
-        [
-            "💾 資料存檔與讀取",
-            "-----------------------",
-            "1. 基本資料輸入 (Step 1)",
-            "2. 財務目標設定 (Step 2)",
-            "3. 收支與資產負債 (Step 3)",
-            "4. 財務健康看板 (Step 4)",
-            "-----------------------",
-            "專題 A：退休規劃",
-            "專題 B：教育金試算",
-            "專題 C：購屋與購車",
-            "專題 D：保險缺口分析",
-            "-----------------------",
-            "📋 客戶總覽報告",
-        ],
-    )
+    page_options = [
+        "💾 資料存檔與讀取",
+        "-----------------------",
+        "1. 基本資料輸入 (Step 1)",
+        "2. 財務目標設定 (Step 2)",
+        "3. 收支與資產負債 (Step 3)",
+        "4. 財務健康看板 (Step 4)",
+        "-----------------------",
+        "專題 A：退休規劃",
+        "專題 B：教育金試算",
+        "專題 C：購屋與購車",
+        "專題 D：保險缺口分析",
+        "-----------------------",
+        "📋 客戶總覽報告",
+    ]
+
+    def _fmt(opt):
+        if opt in completion:
+            return f"{'✅' if completion[opt] else '⬜'}　{opt}"
+        return opt
+
+    menu_selection = st.sidebar.radio("請選擇操作模組：", page_options, format_func=_fmt, key="nav_radio")
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("版本：2026 財務試算網頁互動版 v2.0")
+    st.sidebar.caption("版本：2026 財務試算網頁互動版 v2.1")
 
     pages = {
         "💾 資料存檔與讀取": module_data_management,
