@@ -110,6 +110,39 @@ def item_table(key, items, per_row_label="金額(年)", step=1000):
     return result, sum(result.values())
 
 
+def persist_number_input(label, name, default=0, **kwargs):
+    """穩定版 st.number_input：把使用者輸入的值另外存在一個跟 widget key 脫鉤的
+    session_state 欄位（name）裡，每次都用它來設定 value。
+
+    背景：Streamlit 有個已知怪癖——當一個帶有 key 的 widget，在某一輪 script 執行中
+    『沒有被畫出來』（例如：使用者切到別的頁面/頁籤，這個 widget 所在的函式沒被呼叫到），
+    它在 session_state 裡對應的值有機會被悄悄清掉。等使用者切回來，這個 widget 因為
+    session_state 裡已經沒有東西了，就會改用程式碼寫死的 value（預設值）重新初始化，
+    看起來就像是『打到一半突然跳回原本的預設數字』。
+    這裡改用另一個獨立的 key（name 本身，不等於 widget 真正的 key）手動保存使用者輸入的值，
+    這個值不受 widget 是否被畫出來影響，所以每次都能正確帶回使用者上次輸入的內容。"""
+    current = st.session_state.get(name, default)
+    val = st.number_input(label, value=current, key=f"_w_{name}", **kwargs)
+    st.session_state[name] = val
+    return val
+
+
+def persist_text_input(label, name, default="", **kwargs):
+    """穩定版 st.text_input，原理同 persist_number_input。"""
+    current = st.session_state.get(name, default)
+    val = st.text_input(label, value=current, key=f"_w_{name}", **kwargs)
+    st.session_state[name] = val
+    return val
+
+
+def persist_text_area(label, name, default="", **kwargs):
+    """穩定版 st.text_area，原理同 persist_number_input。"""
+    current = st.session_state.get(name, default)
+    val = st.text_area(label, value=current, key=f"_w_{name}", **kwargs)
+    st.session_state[name] = val
+    return val
+
+
 def _guard_against_epoch_date_reset(edited_df, prev_df, date_col, suspicious_before=datetime.date(1925, 1, 1)):
     """防呆：瀏覽器原生日期輸入框（DateColumn）有個已知怪癖——使用者用鍵盤編輯到一半
     （例如只改了「年」還沒改完月/日）就被中斷（點別處、或畫面因其他元件觸發 rerun），
@@ -503,9 +536,9 @@ def step1_basic_info():
         st.divider()
         c1, c2 = st.columns(2)
         with c1:
-            st.text_input("所屬公司/單位", value=st.session_state.get("firm", "富邦人壽 - 竹耀通訊處"), key="firm")
+            persist_text_input("所屬公司/單位", "firm", "富邦人壽 - 竹耀通訊處")
         with c2:
-            st.text_input("職稱", value=st.session_state.get("title", "處經理"), key="title")
+            persist_text_input("職稱", "title", "處經理")
 
     st.success("✅ 所有輸入即時自動儲存，可直接切換至左側其他頁面。")
 
@@ -710,11 +743,11 @@ def module_retirement():
         with cols[i]:
             st.subheader(f"{icon} {person}")
             with st.form(key=f"rt_form_{person}"):
-                retire_age = st.number_input("預計退休年齡", value=int(row["退休年齡"]), key=f"rt_age_{person}")
-                retire_years = st.number_input("預計退休生活年期", value=int(row["養老年期"]), key=f"rt_years_{person}")
-                pv_expense = st.number_input("預計退休每月所需生活費 (現值/元)", value=30000, step=5000, key=f"rt_pv_{person}")
-                prepared_pv = st.number_input("目前已準備退休金 (現值/元)", value=0, step=50000, key=f"rt_prep_{person}")
-                social_ins = st.number_input("預估社會保險/其他已備資金 (退休時值/元)", value=0, step=100000, key=f"rt_social_{person}")
+                retire_age = persist_number_input("預計退休年齡", f"rt_age_{person}", int(row["退休年齡"]))
+                retire_years = persist_number_input("預計退休生活年期", f"rt_years_{person}", int(row["養老年期"]))
+                pv_expense = persist_number_input("預計退休每月所需生活費 (現值/元)", f"rt_pv_{person}", 30000, step=5000)
+                prepared_pv = persist_number_input("目前已準備退休金 (現值/元)", f"rt_prep_{person}", 0, step=50000)
+                social_ins = persist_number_input("預估社會保險/其他已備資金 (退休時值/元)", f"rt_social_{person}", 0, step=100000)
                 st.form_submit_button("🔄 更新試算結果", use_container_width=True)
 
             work_years = max(0, retire_age - cur_age)
@@ -757,9 +790,9 @@ def _education_level_block(prefix, label, default_years, default_choice):
         choice = st.selectbox("學程", list(TUITION_PRESETS.keys()),
                                index=list(TUITION_PRESETS.keys()).index(default_choice), key=f"{prefix}_choice")
     with c2:
-        years = st.number_input("年期", value=default_years, min_value=0, step=1, key=f"{prefix}_years")
+        years = persist_number_input("年期", f"{prefix}_years", default_years, min_value=0, step=1)
     with c3:
-        cost = st.number_input("費用/年", value=TUITION_PRESETS[choice], step=10000, key=f"{prefix}_cost")
+        cost = persist_number_input("費用/年", f"{prefix}_cost", TUITION_PRESETS[choice], step=10000)
     return years * cost
 
 
@@ -777,8 +810,8 @@ def module_education():
 
     with st.expander("⚙️ 環境假設（學費通膨率／教育基金投報率）", expanded=False):
         c1, c2 = st.columns(2)
-        inflation_rate = c1.number_input("學費預估通膨率 (%)", value=3.0, step=0.5, key="edu_inf") / 100
-        return_rate = c2.number_input("教育基金投資報酬率 (%)", value=5.0, step=0.5, key="edu_ret") / 100
+        inflation_rate = persist_number_input("學費預估通膨率 (%)", "edu_inf", 3.0, step=0.5) / 100
+        return_rate = persist_number_input("教育基金投資報酬率 (%)", "edu_ret", 5.0, step=0.5) / 100
 
     n = min(len(children_df), 4)
     cols = st.columns(n)
@@ -791,9 +824,9 @@ def module_education():
         with cols[i]:
             st.subheader(f"{icon} {c['姓名']}")
             with st.form(key=f"edu_form_{i}"):
-                current_age = st.number_input("目前年齡", value=int(cur_age), step=1, key=f"edu_age_{i}")
-                college_age = st.number_input("預計就讀大學年齡", value=18, step=1, key=f"edu_cage_{i}")
-                prepared = st.number_input("目前已準備教育金", value=0, step=50000, key=f"edu_prep_{i}")
+                current_age = persist_number_input("目前年齡", f"edu_age_{i}", int(cur_age), step=1)
+                college_age = persist_number_input("預計就讀大學年齡", f"edu_cage_{i}", 18, step=1)
+                prepared = persist_number_input("目前已準備教育金", f"edu_prep_{i}", 0, step=50000)
 
                 pv_total = 0
                 pv_total += _education_level_block(f"edu_{i}_u", "大學", 4, "國內私立大學")
@@ -832,13 +865,13 @@ def _big_purchase_plan(prefix, plan_label, default_price, default_years,
                         default_prepared, default_old_asset, is_house=True):
     st.markdown(f"##### {plan_label}")
     with st.form(key=f"{prefix}_form"):
-        years = st.number_input("預計時間 (年)", value=default_years, step=1, key=f"{prefix}_y")
-        price_pv = st.number_input("目標市價 (現值)", value=default_price, step=100000, key=f"{prefix}_price")
-        prepared_pv = st.number_input("目前已備資金 (現值)", value=default_prepared, step=50000, key=f"{prefix}_prep")
-        old_pv = st.number_input("舊資產折抵現值 (舊換新可填)", value=default_old_asset, step=50000, key=f"{prefix}_old")
+        years = persist_number_input("預計時間 (年)", f"{prefix}_y", default_years, step=1)
+        price_pv = persist_number_input("目標市價 (現值)", f"{prefix}_price", default_price, step=100000)
+        prepared_pv = persist_number_input("目前已備資金 (現值)", f"{prefix}_prep", default_prepared, step=50000)
+        old_pv = persist_number_input("舊資產折抵現值 (舊換新可填)", f"{prefix}_old", default_old_asset, step=50000)
         loan_ratio = st.slider("預計貸款成數 (%)", 0, 100, 80 if is_house else 0, 5, key=f"{prefix}_lr") / 100
-        loan_years = st.number_input("貸款年期", value=30 if is_house else 5, step=1, key=f"{prefix}_ly")
-        loan_rate = st.number_input("貸款利率 (%)", value=2.1 if is_house else 3.5, step=0.1, key=f"{prefix}_lrate") / 100
+        loan_years = persist_number_input("貸款年期", f"{prefix}_ly", 30 if is_house else 5, step=1)
+        loan_rate = persist_number_input("貸款利率 (%)", f"{prefix}_lrate", 2.1 if is_house else 3.5, step=0.1) / 100
         st.form_submit_button("🔄 更新試算", use_container_width=True)
 
     return_rate = st.session_state.get(f"{prefix}_ret_rate", 0.06)
@@ -882,8 +915,8 @@ def module_house_and_car():
     with tab_house:
         with st.expander("⚙️ 環境假設（房價通膨率／自備款投報率）", expanded=False):
             c1, c2 = st.columns(2)
-            inflation_rate = c1.number_input("房價預估通膨率 (%)", value=3.0, step=0.5, key="house_infl") / 100
-            return_rate = c2.number_input("自備款投資報酬率 (%)", value=6.0, step=0.5, key="house_ret") / 100
+            inflation_rate = persist_number_input("房價預估通膨率 (%)", "house_infl", 3.0, step=0.5) / 100
+            return_rate = persist_number_input("自備款投資報酬率 (%)", "house_ret", 6.0, step=0.5) / 100
         for p in ["hA", "hB", "hC"]:
             st.session_state[f"{p}_infl"] = inflation_rate
             st.session_state[f"{p}_ret_rate"] = return_rate
@@ -898,8 +931,8 @@ def module_house_and_car():
     with tab_car:
         with st.expander("⚙️ 環境假設（車價通膨率／自備款投報率）", expanded=False):
             c1, c2 = st.columns(2)
-            inflation_rate_c = c1.number_input("車價預估通膨率 (%)", value=3.0, step=0.5, key="car_infl") / 100
-            return_rate_c = c2.number_input("自備款投資報酬率 (%) ", value=6.0, step=0.5, key="car_ret") / 100
+            inflation_rate_c = persist_number_input("車價預估通膨率 (%)", "car_infl", 3.0, step=0.5) / 100
+            return_rate_c = persist_number_input("自備款投資報酬率 (%) ", "car_ret", 6.0, step=0.5) / 100
         for p in ["cA", "cB", "cC"]:
             st.session_state[f"{p}_infl"] = inflation_rate_c
             st.session_state[f"{p}_ret_rate"] = return_rate_c
@@ -926,18 +959,18 @@ def module_insurance():
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**應備金額**")
-            l_living_yr = st.number_input("家人生活費用 (每年)", 0, step=10000, key="l_living_yr")
-            l_living_n = st.number_input("需照顧年期", 0, step=1, value=10, key="l_living_n")
-            l_par = st.number_input("本人父母孝養金 (總額)", 0, step=10000, key="l_par")
-            l_mort = st.number_input("房貸餘額", 0, step=100000, key="l_mort")
-            l_oth = st.number_input("其他貸款餘額", 0, step=10000, key="l_oth")
-            l_fin = st.number_input("最後費用（喪葬等）", 0, step=10000, key="l_fin")
+            l_living_yr = persist_number_input("家人生活費用 (每年)", "l_living_yr", 0, min_value=0, step=10000)
+            l_living_n = persist_number_input("需照顧年期", "l_living_n", 10, min_value=0, step=1)
+            l_par = persist_number_input("本人父母孝養金 (總額)", "l_par", 0, min_value=0, step=10000)
+            l_mort = persist_number_input("房貸餘額", "l_mort", 0, min_value=0, step=100000)
+            l_oth = persist_number_input("其他貸款餘額", "l_oth", 0, min_value=0, step=10000)
+            l_fin = persist_number_input("最後費用（喪葬等）", "l_fin", 0, min_value=0, step=10000)
         with c2:
             st.markdown("**已備保額**")
-            l_term = st.number_input("定期壽險保額", 0, step=100000, key="l_term")
-            l_whole = st.number_input("終身壽險保額", 0, step=100000, key="l_whole")
-            l_labor = st.number_input("勞保／國保身故給付", 0, step=100000, key="l_labor")
-            l_gov = st.number_input("軍公教保額", 0, step=100000, key="l_gov")
+            l_term = persist_number_input("定期壽險保額", "l_term", 0, min_value=0, step=100000)
+            l_whole = persist_number_input("終身壽險保額", "l_whole", 0, min_value=0, step=100000)
+            l_labor = persist_number_input("勞保／國保身故給付", "l_labor", 0, min_value=0, step=100000)
+            l_gov = persist_number_input("軍公教保額", "l_gov", 0, min_value=0, step=100000)
         st.form_submit_button("🔄 更新試算", use_container_width=True)
 
     total_l_need = l_living_yr * l_living_n + l_par + l_mort + l_oth + l_fin
@@ -952,16 +985,16 @@ def module_insurance():
         c3, c4 = st.columns(2)
         with c3:
             st.markdown("**應備金額**")
-            a_dis = st.number_input("生活費用(殘扶) (每年)", 0, step=10000, key="a_dis")
-            a_liv = st.number_input("家人生活費用 (每年)", 0, step=10000, key="a_liv")
-            a_par = st.number_input("本人父母孝養金 (總額)", 0, step=10000, key="a_par")
-            a_mort = st.number_input("房貸餘額", 0, step=100000, key="a_mort")
-            a_oth = st.number_input("其他貸款", 0, step=10000, key="a_oth")
+            a_dis = persist_number_input("生活費用(殘扶) (每年)", "a_dis", 0, min_value=0, step=10000)
+            a_liv = persist_number_input("家人生活費用 (每年)", "a_liv", 0, min_value=0, step=10000)
+            a_par = persist_number_input("本人父母孝養金 (總額)", "a_par", 0, min_value=0, step=10000)
+            a_mort = persist_number_input("房貸餘額", "a_mort", 0, min_value=0, step=100000)
+            a_oth = persist_number_input("其他貸款", "a_oth", 0, min_value=0, step=10000)
         with c4:
             st.markdown("**已備保額**")
-            a_grp = st.number_input("團體意外險保額", 0, step=100000, key="a_grp")
-            a_gov = st.number_input("軍公教保額", 0, step=100000, key="a_gov2")
-            a_com = st.number_input("商業保險保額", 0, step=100000, key="a_com")
+            a_grp = persist_number_input("團體意外險保額", "a_grp", 0, min_value=0, step=100000)
+            a_gov = persist_number_input("軍公教保額", "a_gov2", 0, min_value=0, step=100000)
+            a_com = persist_number_input("商業保險保額", "a_com", 0, min_value=0, step=100000)
         st.form_submit_button("🔄 更新試算", use_container_width=True)
 
     total_a_need = a_dis + a_liv + a_par + a_mort + a_oth
@@ -988,10 +1021,10 @@ def module_insurance():
     with st.form("hosp_form"):
         d1, d2 = st.columns(2)
         with d1:
-            d_whole = st.number_input("終身日額", 0, step=500, key="d_whole")
-            d_term = st.number_input("定期日額", 0, step=500, key="d_term")
+            d_whole = persist_number_input("終身日額", "d_whole", 0, min_value=0, step=500)
+            d_term = persist_number_input("定期日額", "d_term", 0, min_value=0, step=500)
         with d2:
-            d_real = st.number_input("實支實付（換算日額）", 0, step=500, key="d_real")
+            d_real = persist_number_input("實支實付（換算日額）", "d_real", 0, min_value=0, step=500)
         st.form_submit_button("🔄 更新試算", use_container_width=True)
 
     total_d_exist = d_whole + d_term + d_real
@@ -1303,9 +1336,9 @@ def summary_report_page():
 
     st.markdown('<div class="fp-section-eyebrow" style="margin-top:26px;"><div class="line"></div><div class="txt">📝 顧問建議</div></div>', unsafe_allow_html=True)
     st.markdown('<div class="fp-note-card">', unsafe_allow_html=True)
-    advisor_note = st.text_area("給客戶的建議摘要（可自行編輯，會保留在本次工作階段）",
-                                 value=st.session_state.get("advisor_note", ""), height=140,
-                                 key="advisor_note", label_visibility="collapsed")
+    advisor_note = persist_text_area("給客戶的建議摘要（可自行編輯，會保留在本次工作階段）",
+                                      "advisor_note", "", height=140,
+                                      label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
