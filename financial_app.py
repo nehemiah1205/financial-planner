@@ -1111,7 +1111,7 @@ def module_data_management():
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("⬇️ 匯出備份")
+        st.subheader("💾 匯出儲存")
         client_name = ""
         fam = st.session_state.get("family_df")
         if fam is not None and len(fam):
@@ -1122,26 +1122,30 @@ def module_data_management():
 
         export_data = _export_all_data()
         json_bytes = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
-        st.download_button("📥 下載備份檔 (.json)", data=json_bytes, file_name=fname,
-                            mime="application/json", type="primary", use_container_width=True)
         st.caption("涵蓋：家庭成員、財務目標、收支資產負債表（含調整後）、退休參數，"
                    "以及各專題（退休/教育金/購屋購車/保險）已輸入的數字與顧問建議。")
 
     with col2:
-        st.subheader("⬆️ 匯入備份")
-        uploaded = st.file_uploader("選擇先前下載的備份檔 (.json)", type=["json"], key="backup_uploader")
-        if uploaded is not None:
-            sig = f"{uploaded.name}_{uploaded.size}"
-            if st.session_state.get("_last_import_sig") != sig:
-                try:
-                    _import_all_data(uploaded)
-                    st.session_state["_last_import_sig"] = sig
-                    st.success("✅ 資料讀取成功！請至左側選單查看各項分析結果。")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 檔案格式錯誤或內容不符，請確認上傳的是本系統匯出的 .json 備份檔。（{e}）")
-            else:
-                st.success("✅ 這份備份檔的資料已經讀取完成，可切換至左側選單查看。")
+        st.subheader("📥 下載檔案")
+        st.download_button("下載備份檔 (.json)", data=json_bytes, file_name=fname,
+                            mime="application/json", type="primary", use_container_width=True)
+        st.caption(f"檔名：{fname}")
+
+    st.divider()
+    st.subheader("⬆️ 匯入備份")
+    uploaded = st.file_uploader("選擇先前下載的備份檔 (.json)", type=["json"], key="backup_uploader")
+    if uploaded is not None:
+        sig = f"{uploaded.name}_{uploaded.size}"
+        if st.session_state.get("_last_import_sig") != sig:
+            try:
+                _import_all_data(uploaded)
+                st.session_state["_last_import_sig"] = sig
+                st.success("✅ 資料讀取成功！請至左側選單查看各項分析結果。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 檔案格式錯誤或內容不符，請確認上傳的是本系統匯出的 .json 備份檔。（{e}）")
+        else:
+            st.success("✅ 這份備份檔的資料已經讀取完成，可切換至左側選單查看。")
         st.caption("⚠️ 匯入會覆蓋目前畫面上的資料，請先確認不需要目前的內容再上傳。")
 
 
