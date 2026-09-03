@@ -481,9 +481,10 @@ def step1_basic_info():
     section_header("👥", "家庭成員基本資料", top_margin=20)
     st.info("💡 **表格操作**：雙擊儲存格可直接編輯；點表格最下方「+」新增一列；勾選最左側方塊後按 `Delete` 可刪除該列。")
 
-    prev_family_df = get_family_df().copy()
+    live_family_df = get_family_df()
+    prev_family_df = live_family_df.copy()  # 僅用於下方「生日誤觸發極早日期」防呆比對，不餵給 data_editor
     edited_df = st.data_editor(
-        prev_family_df,
+        live_family_df,
         column_config={
             "性別": st.column_config.SelectboxColumn("性別", options=["男", "女", "其他"], required=True),
             "生日": st.column_config.DateColumn(
